@@ -23,8 +23,11 @@ android {
         def propfile = new File(rootDir, 'ndk.properties')
         if (propfile.exists())
             props.load(new FileInputStream(propfile))
-        ndkVersion = props.getProperty('ndkVersion', '')
+        ndkVersion = props.getProperty('ndkVersion', '29.0.14206865')
         ndkPath = props.getProperty('ndkRoot', '')
+        if (ndkVersion && !new File("$ndkPath/source.properties").exists() && !new File(System.getenv("ANDROID_HOME") ?: "" + "/ndk/$ndkVersion/source.properties").exists()) {
+            logger.warn("NDK $ndkVersion not found, run buildscripts/include/download-sdk.sh or set ndkPath")
+        }
     }
 
     flavorDimensions "default"

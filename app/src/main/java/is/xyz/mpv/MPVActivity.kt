@@ -351,12 +351,11 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             try {
                 twitchPrevHeaders = MPVLib.getPropertyString("http-header-fields")
                 twitchPrevUa = MPVLib.getPropertyString("user-agent")
-                MPVLib.setPropertyString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
-                // user-agent is option-only on some libmpv; try property then fallback to file-local-options via command
-                try { MPVLib.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36") } catch (_: Exception) {}
-                try { MPVLib.command(arrayOf("set", "file-local-options/user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")) } catch (_: Exception) {}
+                // Use file-local to avoid leaking to next non-Twitch file
+                try { MPVLib.command(arrayOf("set", "file-local-options/http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")) } catch (_: Exception) { MPVLib.setPropertyString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv") }
+                try { MPVLib.command(arrayOf("set", "file-local-options/user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")) } catch (_: Exception) { try { MPVLib.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36") } catch (_: Exception) {} }
                 if (BuildConfig.DEBUG) try { MPVLib.setPropertyString("msg-level", "all=v") } catch (_: Exception) {}
-                Log.v(TAG, "Twitch headers set for $twitchChannel master=$twitchMasterUrl")
+                Log.v(TAG, "Twitch headers set for $twitchChannel master=${twitchMasterUrl?.replace(Regex("token=[^&\\s]+"), "token=***")?.replace(Regex("sig=[^&\\s]+"), "sig=***")}")
             } catch (_: Exception) {}
         }
         player.playFile(filepath)
@@ -398,8 +397,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                     try { noAdMaster = TwitchService.getHlsMasterUrl(applicationContext, ch, withoutAds = true) } catch (_: Exception) {}
                     if (isFinishing || isDestroyed) return@launch
                     twitchAdMonitor = TwitchAdMonitor(applicationContext, ch, prefQuality, { newUrl, reason, isAudio ->
-                        Log.i(TAG, "AdMonitor switch $reason -> $newUrl")
+                        val safe = newUrl.replace(Regex("token=[^&\\s]+"), "token=***").replace(Regex("sig=[^&\\s]+"), "sig=***")
+                        Log.i(TAG, "AdMonitor switch $reason -> $safe")
                         runOnUiThread {
+                            if (isFinishing || isDestroyed || !activityIsForeground) return@runOnUiThread
                             try {
                                 // keep selection for next switch
                                 twitchCurrentVariantUrl = newUrl
@@ -496,12 +497,51 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     override fun onNewIntent(intent: Intent?) {
         Log.v(TAG, "onNewIntent($intent)")
         super.onNewIntent(intent)
+        setIntent(intent)
 
         // Happens when mpv is still running (not necessarily playing) and the user selects a new
         // file to be played from another app
         val filepath = intent?.let { parsePathFromIntent(it) }
         if (filepath == null) {
             return
+        }
+
+        // If twitch channel switched, update tracking and restart monitor
+        val newTwitch = intent.getStringExtra("twitch_channel")?.lowercase()
+        if (newTwitch != null && newTwitch != twitchChannel) {
+            twitchAdMonitor?.stop()
+            twitchAdMonitor = null
+            twitchChannel = newTwitch
+            twitchMasterUrl = intent.getStringExtra("twitch_master_url")
+            twitchCurrentVariantUrl = filepath
+            twitchVariants = emptyList()
+            // fetch variants for new channel like onCreate
+            val master = twitchMasterUrl ?: filepath
+            val isAudioOnly = intent.getBooleanExtra("twitch_is_audio_only", false)
+            if (isAudioOnly) {
+                try { MPVLib.setPropertyString("vid", "no") } catch (_: Exception) {}
+            }
+            lifecycleScope.launch {
+                try {
+                    val vars = TwitchService.fetchVariants(master)
+                    twitchVariants = vars
+                } catch (_: Exception) {}
+            }
+        }
+        // Clear Twitch headers for non-Twitch files (privacy)
+        if (newTwitch == null && twitchChannel != null) {
+            try { MPVLib.setPropertyString("http-header-fields", twitchPrevHeaders ?: "") } catch (_: Exception) {}
+            try { MPVLib.setPropertyString("user-agent", twitchPrevUa ?: "") } catch (_: Exception) {}
+            twitchChannel = null
+            twitchMasterUrl = null
+            twitchAdMonitor?.stop()
+            twitchAdMonitor = null
+        }
+
+        // Set file-local headers only for Twitch
+        if (newTwitch != null) {
+            try { MPVLib.command(arrayOf("set", "file-local-options/http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")) } catch (_: Exception) {}
+            try { MPVLib.command(arrayOf("set", "file-local-options/user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")) } catch (_: Exception) {}
         }
 
         if (!activityIsForeground && didResumeBackgroundPlayback) {
@@ -575,12 +615,13 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         val shouldBackground = shouldBackground()
 
         activityIsForeground = false
-        eventUiHandler.removeCallbacksAndMessages(null)
-        // Battery: pause ad monitor when backgrounded - will resume in onResume
-        if (shouldBackground) {
-            twitchAdMonitor?.let { Log.v(TAG, "pausing ad monitor for background"); it.stop() }
-            // keep object but stopped; onResume will restart if needed (don't null to avoid race, start() handles stopped)
-        }
+        // Only clear fade handlers, keep eventUi queue for vid property restores
+        fadeHandler.removeCallbacks(fadeRunnable)
+        fadeHandler.removeCallbacks(fadeRunnable2)
+        fadeHandler.removeCallbacks(fadeRunnable3)
+        // Battery: pause ad monitor when backgrounded - will resume in onResume, persist ad state
+        // Always stop when going background to save battery, resume conditionally
+        twitchAdMonitor?.let { Log.v(TAG, "pausing ad monitor for background"); it.stop(persistAdState = true) }
         if (isFinishing) {
             savePosition()
             // tell mpv to shut down so that any other property changes or such are ignored,
@@ -699,9 +740,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                         try { noAd = TwitchService.getHlsMasterUrl(applicationContext, ch, withoutAds = true) } catch (_: Exception) {}
                         if (isFinishing || isDestroyed) return@launch
                         twitchAdMonitor = TwitchAdMonitor(applicationContext, ch, prefQuality, { newUrl, reason, isAudio ->
-                            Log.i(TAG, "AdMonitor switch $reason -> $newUrl")
+                            val safe = newUrl.replace(Regex("token=[^&\\s]+"), "token=***").replace(Regex("sig=[^&\\s]+"), "sig=***")
+                            Log.i(TAG, "AdMonitor switch $reason -> $safe")
                             runOnUiThread {
-                                if (isFinishing || isDestroyed) return@runOnUiThread
+                                if (isFinishing || isDestroyed || !activityIsForeground) return@runOnUiThread
                                 try {
                                     twitchCurrentVariantUrl = newUrl
                                     val keepAudio = isAudio || prefQuality == "audio_only" || isAudioOnly

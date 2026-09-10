@@ -105,15 +105,21 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
         MPVLib.setOptionString("tls-verify", "yes")
         MPVLib.setOptionString("tls-ca-file", "${this.context.filesDir.path}/cacert.pem")
         MPVLib.setOptionString("input-default-bindings", "yes")
-        // Limit demuxer cache - smaller for audio-only battery saver
+        // Limit demuxer cache - smaller for audio-only battery saver, low-RAM cap
         val isAudioOnly = try { PreferenceManager.getDefaultSharedPreferences(context).getBoolean("twitch_audio_only", false) } catch (_: Exception) { false }
-        val baseCache = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32
-        val cacheMegs = if (isAudioOnly) 16 else baseCache
+        val am = context.getSystemService(android.app.ActivityManager::class.java)
+        val isLowRam = try { am?.isLowRamDevice == true } catch (_: Exception) { false }
+        val baseCache = when {
+            isLowRam -> 16
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 -> 64
+            else -> 32
+        }
+        val cacheMegs = if (isAudioOnly) 16.coerceAtMost(baseCache) else baseCache
         MPVLib.setOptionString("demuxer-max-bytes", "${cacheMegs * 1024 * 1024}")
-        MPVLib.setOptionString("demuxer-max-back-bytes", "${cacheMegs * 1024 * 1024}")
+        MPVLib.setOptionString("demuxer-max-back-bytes", "${(cacheMegs/2) * 1024 * 1024}")
         //
-        val screenshotDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-        screenshotDir.mkdirs()
+        val screenshotDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: File(context.filesDir, "screenshots")
+        try { screenshotDir.mkdirs() } catch (_: Exception) {}
         MPVLib.setOptionString("screenshot-directory", screenshotDir.path)
     }
 
@@ -258,7 +264,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
         val playlist = mutableListOf<PlaylistItem>()
         val count = MPVLib.getPropertyInt("playlist-count") ?: return playlist
         for (i in 0 until count) {
-            val filename = MPVLib.getPropertyString("playlist/$i/filename")!!
+            val filename = MPVLib.getPropertyString("playlist/$i/filename") ?: continue
             val title = MPVLib.getPropertyString("playlist/$i/title")
             playlist.add(PlaylistItem(index=i, filename=filename, title=title))
         }
@@ -272,7 +278,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
         val count = MPVLib.getPropertyInt("chapter-list/count") ?: return chapters
         for (i in 0 until count) {
             val title = MPVLib.getPropertyString("chapter-list/$i/title")
-            val time = MPVLib.getPropertyDouble("chapter-list/$i/time")!!
+            val time = MPVLib.getPropertyDouble("chapter-list/$i/time") ?: continue
             chapters.add(Chapter(
                     index=i,
                     title=title,
@@ -286,11 +292,11 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
 
     var paused: Boolean?
         get() = MPVLib.getPropertyBoolean("pause")
-        set(paused) = MPVLib.setPropertyBoolean("pause", paused!!)
+        set(v) { if (v != null) MPVLib.setPropertyBoolean("pause", v) }
 
     var timePos: Double?
         get() = MPVLib.getPropertyDouble("time-pos/full")
-        set(progress) = MPVLib.setPropertyDouble("time-pos", progress!!)
+        set(v) { if (v != null) MPVLib.setPropertyDouble("time-pos", v) }
 
     /** name of currently active hardware decoder or "no" */
     val hwdecActive: String

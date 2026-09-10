@@ -50,6 +50,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     private lateinit var adapter: ChannelAdapter
     private var metasJob: Job? = null
     private var lastRefreshMs = 0L
+    private var audioSwitchListener: ((Boolean) -> Unit)? = null
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         try {
@@ -78,16 +79,20 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
 
             // audio-only switch reflects mpv background + power saver (synced with quality) - single atomic edit
             val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-            binding.audioOnlySwitch.isChecked = prefs.getBoolean("twitch_audio_only", false)
-            binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked ->
+            val currentAudio = prefs.getBoolean("twitch_audio_only", false)
+            binding.audioOnlySwitch.setOnCheckedChangeListener(null)
+            binding.audioOnlySwitch.isChecked = currentAudio
+            val listener = { checked: Boolean ->
                 prefs.edit().apply {
                     putBoolean("twitch_audio_only", checked)
                     if (checked) putString("twitch_default_quality", "audio_only")
                     else if (prefs.getString("twitch_default_quality", "chunked") == "audio_only") putString("twitch_default_quality", "chunked")
                 }.apply()
                 updateQualityBtn()
-                Toast.makeText(requireContext(), if(checked) "Audio-only: max battery" else "Video enabled", Toast.LENGTH_SHORT).show()
+                context?.let { Toast.makeText(it, if(checked) "Audio-only: max battery" else "Video enabled", Toast.LENGTH_SHORT).show() }
             }
+            audioSwitchListener = listener
+            binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked -> listener(checked) }
 
             binding.swipeRefresh.setOnRefreshListener { refreshList(force = true) }
             // quick open twitch
@@ -106,7 +111,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             refreshList()
         } catch (e: Exception) {
             Log.e("TwitchMain", "onViewCreated failed", e)
-            Toast.makeText(requireContext(), "Twitch UI init failed: ${e.message}", Toast.LENGTH_LONG).show()
+            context?.let { Toast.makeText(it, "Twitch UI init failed: ${e.message}", Toast.LENGTH_LONG).show() }
         }
     }
 
@@ -140,7 +145,10 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                     putString("twitch_default_quality", chosen)
                     putBoolean("twitch_audio_only", chosen == "audio_only")
                 }.apply()
+                // avoid listener loop
+                binding.audioOnlySwitch.setOnCheckedChangeListener(null)
                 binding.audioOnlySwitch.isChecked = chosen == "audio_only"
+                binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked -> audioSwitchListener?.invoke(checked) }
                 updateQualityBtn()
                 Toast.makeText(requireContext(), "Default: ${options[which]}", Toast.LENGTH_SHORT).show()
             }
@@ -149,10 +157,9 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun showChannelQualityPicker(channel: String) {
-        if (!isAdded) return
+        if (!isAdded || requireActivity().isFinishing || requireActivity().isDestroyed) return
         val appCtx = requireContext().applicationContext
-        val loading = AlertDialog.Builder(requireContext()).setTitle("Fetching qualities for $channel…").setMessage("Contacting Twitch…").setCancelable(false).create()
-        loading.show()
+        val loading = try { AlertDialog.Builder(requireContext()).setTitle("Fetching qualities for $channel…").setMessage("Contacting Twitch…").setCancelable(false).create().also { it.show() } } catch (_: Exception) { return }
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val master = TwitchService.getHlsMasterUrl(appCtx, channel, withoutAds = false)
@@ -202,13 +209,22 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         if (System.currentTimeMillis() - lastRefreshMs > 500) refreshList()
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        _binding?.let {
+            val span = if (newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 3 else 2
+            (it.recycler.layoutManager as? GridLayoutManager)?.spanCount = span
+        }
+    }
+
     private fun refreshList(force: Boolean = false) {
-        if (!isAdded || _binding == null || !::adapter.isInitialized) return
+        val b = _binding ?: return
+        if (!isAdded || !::adapter.isInitialized) return
         // debounce unless forced (swipe) - avoid GQL spam on rapid resume
         if (!force && System.currentTimeMillis() - lastRefreshMs < 8000 && metasJob?.isActive == true) return
         if (!force && System.currentTimeMillis() - lastRefreshMs < 30000 && adapter.itemCount > 0) {
             // use cached metas if recently refreshed
-            binding.swipeRefresh.isRefreshing = false
+            b.swipeRefresh.isRefreshing = false
             return
         }
         val ctx = context ?: return
@@ -216,9 +232,9 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         val recent = TwitchService.getRecent(ctx)
         val combined = (fav + recent.filterNot { fav.contains(it) }).distinct()
         adapter.submit(combined)
-        binding.emptyHint.visibility = if (combined.isEmpty()) View.VISIBLE else View.GONE
-        binding.swipeRefresh.isRefreshing = combined.isNotEmpty()
-        binding.subtitle.text = if (fav.isEmpty()) "Add streamers to start \u00b7 tap + below"
+        b.emptyHint.visibility = if (combined.isEmpty()) View.VISIBLE else View.GONE
+        b.swipeRefresh.isRefreshing = combined.isNotEmpty()
+        b.subtitle.text = if (fav.isEmpty()) "Add streamers to start \u00b7 tap + below"
         else "${fav.size} favorite${if(fav.size!=1) "s" else ""} \u00b7 ${recent.size} recent"
 
         if (combined.isNotEmpty()) {
@@ -232,11 +248,11 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                 } catch (e: Exception) {
                     Log.w("TwitchMain", "metas failed", e)
                 } finally {
-                    if (isAdded && _binding != null) binding.swipeRefresh.isRefreshing = false
+                    _binding?.let { if (isAdded) it.swipeRefresh.isRefreshing = false }
                 }
             }
         } else {
-            binding.swipeRefresh.isRefreshing = false
+            b.swipeRefresh.isRefreshing = false
         }
     }
 
@@ -298,7 +314,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun playChannel(channel: String, forceAudioOnly: Boolean? = null) {
-        if (!isAdded) return
+        if (!isAdded || requireActivity().isFinishing || requireActivity().isDestroyed) return
         val appCtx = requireContext().applicationContext
         val prefs = PreferenceManager.getDefaultSharedPreferences(appCtx)
         val audioOnly = forceAudioOnly ?: prefs.getBoolean("twitch_audio_only", false)
@@ -307,12 +323,13 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         TwitchService.pushRecent(appCtx, channel)
 
         // show loading - ensure dismiss on cancel/destroy to avoid WindowLeaked
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Connecting to $channel…")
-            .setMessage("Fetching stream (${if(audioOnly) "audio-only" else "auto quality"})…")
-            .setCancelable(false)
-            .create()
-        dlg.show()
+        val dlg = try {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Connecting to $channel…")
+                .setMessage("Fetching stream (${if(audioOnly) "audio-only" else "auto quality"})…")
+                .setCancelable(false)
+                .create().also { it.show() }
+        } catch (_: Exception) { return }
 
         // Use viewLifecycleOwner.lifecycleScope + isAdded guards - ensure dialog dismissed
         viewLifecycleOwner.lifecycleScope.launch {
@@ -430,35 +447,39 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             h.offlineDim.visibility = if (meta != null && !isOnline) View.VISIBLE else View.GONE
             h.thumb.alpha = if (meta != null && !isOnline) 0.55f else 1f
             h.viewersBadge.visibility = View.GONE // CDN path has no viewers without extra GQL; keep hidden
-            // Icon via Glide - override to save mem, use fragment lifecycle
+            // Icon via Glide - override to save mem, guard destroyed activity
             val iconUrl = meta?.iconUrl
-            Glide.with(h.icon).clear(h.icon)
+            try { Glide.with(h.icon).clear(h.icon) } catch (_: Exception) {}
             if (iconUrl != null) {
-                Glide.with(h.icon).load(iconUrl)
-                    .apply(RequestOptions().override(112,112).circleCrop().diskCacheStrategy(DiskCacheStrategy.DATA))
-                    .placeholder(R.drawable.ic_play_arrow_black_24dp).into(h.icon)
+                try {
+                    if (isAdded) Glide.with(h.icon).load(iconUrl)
+                        .apply(RequestOptions().override(112,112).circleCrop().diskCacheStrategy(DiskCacheStrategy.DATA))
+                        .placeholder(R.drawable.ic_play_arrow_black_24dp).into(h.icon)
+                } catch (_: Exception) { h.icon.setImageResource(R.drawable.ic_play_arrow_black_24dp) }
             } else {
                 h.icon.setImageResource(R.drawable.ic_play_arrow_black_24dp)
             }
             // Thumb via CDN - avoid recylce corruption by clearing first and tagging
-            Glide.with(h.thumb).clear(h.thumb)
+            try { Glide.with(h.thumb).clear(h.thumb) } catch (_: Exception) {}
             h.thumb.tag = ch
             val previewUrl = meta?.previewUrl ?: TwitchService.previewCdnUrl(ch)
             if (isOnline) {
-                Glide.with(h.thumb).load(previewUrl)
-                    .apply(RequestOptions().override(320,180).diskCacheStrategy(DiskCacheStrategy.DATA))
-                    .placeholder(android.R.color.transparent)
-                    .error(android.R.color.transparent)
-                    .listener(object: RequestListener<Drawable> {
-                        override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirst: Boolean): Boolean {
-                            if (h.thumb.tag != ch || h.bindingAdapterPosition == RecyclerView.NO_POSITION) return false
-                            h.offlineDim.visibility = View.VISIBLE
-                            h.liveBadge.visibility = View.GONE
-                            return false
-                        }
-                        override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, ds: DataSource, isFirst: Boolean) = false
-                    })
-                    .into(h.thumb)
+                try {
+                    if (isAdded) Glide.with(h.thumb).load(previewUrl)
+                        .apply(RequestOptions().override(320,180).diskCacheStrategy(DiskCacheStrategy.DATA))
+                        .placeholder(android.R.color.transparent)
+                        .error(android.R.color.transparent)
+                        .listener(object: RequestListener<Drawable> {
+                            override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirst: Boolean): Boolean {
+                                if (h.thumb.tag != ch || h.bindingAdapterPosition == RecyclerView.NO_POSITION) return false
+                                h.offlineDim.visibility = View.VISIBLE
+                                h.liveBadge.visibility = View.GONE
+                                return false
+                            }
+                            override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, ds: DataSource, isFirst: Boolean) = false
+                        })
+                        .into(h.thumb)
+                } catch (_: Exception) {}
             } else {
                 h.thumb.setBackgroundColor(0xFF1A1A1A.toInt())
             }

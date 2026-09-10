@@ -136,8 +136,8 @@ class TwitchAdMonitor(
                     }
 
                     // Normal live, poll interval based on targetDuration - increased to save battery, respect power saver
-                    val pm = context.getSystemService(PowerManager::class.java)
-                    val isPowerSave = pm?.isPowerSaveMode == true
+                    val pm = try { context.getSystemService(PowerManager::class.java) } catch (_: Exception) { null }
+                    val isPowerSave = try { pm?.isPowerSaveMode == true } catch (_: Exception) { false }
                     val baseInterval = if (isInAdMode) 2000L else (extractTargetDuration(siteMediaText) * 1000L * 3 / 4)
                     var interval = baseInterval.coerceIn(3000, 8000)
                     if (isPowerSave) interval = (interval * 1.2).toLong().coerceAtMost(8000)
@@ -153,11 +153,12 @@ class TwitchAdMonitor(
         }
     }
 
-    fun stop() {
+    @Synchronized
+    fun stop(persistAdState: Boolean = false) {
         stopped = true
         job?.cancel()
         job = null
-        isInAdMode = false
+        if (!persistAdState) isInAdMode = false
         lastSiteVariantsFetchMs = 0
     }
 
@@ -172,8 +173,8 @@ class TwitchAdMonitor(
         return TwitchService.findBestVariant(variants, prefId)
     }
 
-    // Lightweight GET for media playlist (small, ~2KB) - must run on IO
-    private suspend fun httpGetQuick(urlStr: String): String = withContext(Dispatchers.IO) {
+    // Lightweight GET for media playlist (small, ~2KB) - caller already on IO, no extra hop
+    private fun httpGetQuick(urlStr: String): String {
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
         try {
@@ -187,27 +188,29 @@ class TwitchAdMonitor(
             val code = conn.responseCode
             if (code !in 200..299) {
                 val err = conn.errorStream?.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() } ?: ""
-                throw RuntimeException("HTTP $code for $urlStr: $err")
+                val safe = urlStr.replace(Regex("token=[^&\\s]+"), "token=***").replace(Regex("sig=[^&\\s]+"), "sig=***")
+                throw RuntimeException("HTTP $code for $safe: $err")
             }
-            return@withContext conn.inputStream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
+            return conn.inputStream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
         } finally { conn.disconnect() }
     }
 
     /** Ad detection parity: check DATERANGE stitched-ad OR last segment != live - avoid 3x lines() alloc */
     internal fun isAdInMedia(text: String): Boolean {
         if (text.isEmpty()) return false
-        if (text.contains("twitch-stitched-ad")) return true
-        if (text.contains("X-TV-TWITCH-AD-")) return true
+        if (text.contains("twitch-stitched-ad", ignoreCase = true)) return true
+        if (text.contains("X-TV-TWITCH-AD-", ignoreCase = true)) return true
         var lastInf: String? = null
         var lastUrl = ""
         text.lineSequence().forEach { line ->
             if (line.startsWith("#EXTINF")) lastInf = line
             else if (line.isNotBlank() && !line.startsWith("#")) lastUrl = line
         }
-        if (lastUrl.contains("stitched") || lastUrl.contains("/ad/")) return true
+        if (lastUrl.contains("stitched", ignoreCase = true) || lastUrl.contains("/ad/")) return true
         if (lastInf == null) return false
-        val name = lastInf!!.substringAfter(",", "").trim()
-        return name.isNotEmpty() && name != "live"
+        // Twitch title is after first comma; handle titles with commas correctly
+        val name = Regex("""#EXTINF:[^,]*,(.*)""").find(lastInf!!)?.groupValues?.get(1)?.trim() ?: lastInf!!.substringAfter(",", "").trim()
+        return name.isNotEmpty() && !name.equals("live", ignoreCase = true)
     }
 
     private fun extractTargetDuration(text: String): Long {

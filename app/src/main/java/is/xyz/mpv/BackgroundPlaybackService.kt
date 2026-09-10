@@ -29,18 +29,27 @@ import `is`.xyz.mpv.MPVLib.MpvEvent
 
 class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
     override fun onCreate() {
-        thumbnailHandler = Handler(mainLooper)
+        // Use background thread for thumbnail grab to avoid ANR (30-80ms swscale on main)
+        val ht = android.os.HandlerThread("thumb")
+        ht.start()
+        thumbnailHandler = Handler(ht.looper)
+        mainHandler = Handler(mainLooper)
 
         MPVLib.addObserver(this)
     }
 
     private lateinit var thumbnailHandler: Handler
+    private lateinit var mainHandler: Handler
     private val thumbnailRunnable = Runnable {
-        grabThumbnail()
-        thumbnailChanged?.let {
-            it() // FIXME: this is a dumb hack, we need to refactor the responsiblities
+        // heavy grab off main thread
+        val bmp = try { grabThumbnailInternal() } catch (_: Exception) { null }
+        mainHandler.post {
+            thumbnail = bmp
+            thumbnailChanged?.let {
+                it() // FIXME: this is a dumb hack, we need to refactor the responsiblities
+            }
+            refreshNotification()
         }
-        refreshNotification()
     }
 
     private var cachedMetadata = Utils.AudioMetadata()
@@ -83,11 +92,17 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
                 builder.setLargeIcon(it)
 
                 builder.setColorized(true)
-                // scale thumbnail to a single color in two steps
-                val b1 = Bitmap.createScaledBitmap(it, 16, 16, true)
-                val b2 = Bitmap.createScaledBitmap(b1, 1, 1, true)
-                builder.setColor(b2.getPixel(0, 0))
-                b2.recycle(); b1.recycle()
+                // scale thumbnail to a single color in two steps - guard OOM
+                var b1: Bitmap? = null
+                var b2: Bitmap? = null
+                try {
+                    b1 = Bitmap.createScaledBitmap(it, 16, 16, true)
+                    b2 = Bitmap.createScaledBitmap(b1, 1, 1, true)
+                    builder.setColor(b2.getPixel(0, 0))
+                } catch (_: Exception) {} finally {
+                    try { b2?.recycle() } catch (_: Exception) {}
+                    try { b1?.recycle() } catch (_: Exception) {}
+                }
             }
         }
 
@@ -139,7 +154,13 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
         } else {
             0
         }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground failed", e)
+            // fallback without type
+            try { ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0) } catch (_: Exception) {}
+        }
 
         return START_NOT_STICKY // Android can't restart this service on its own
     }
@@ -147,7 +168,8 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
     override fun onDestroy() {
         MPVLib.removeObserver(this)
 
-        thumbnailHandler.removeCallbacksAndMessages(null)
+        try { thumbnailHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
+        try { thumbnailHandler.looper.quitSafely() } catch (_: Exception) {}
 
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.cancel(NOTIFICATION_ID)
@@ -220,12 +242,13 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
             })
         }
 
-        private fun grabThumbnail() {
+        private fun grabThumbnailInternal(): Bitmap? {
             val fmt = MPVLib.getPropertyString("video-format")
-            thumbnail = if (fmt.isNullOrEmpty())
-                null
-            else
-                MPVLib.grabThumbnail(THUMB_SIZE)
+            return if (fmt.isNullOrEmpty()) null else MPVLib.grabThumbnail(THUMB_SIZE)
+        }
+        @Deprecated("use grabThumbnailInternal")
+        private fun grabThumbnail() {
+            thumbnail = grabThumbnailInternal()
         }
 
         private const val TAG = "mpv"

@@ -42,7 +42,8 @@ object TwitchIntegrityWebView {
                 val json = java.net.URLDecoder.decode(match.groupValues[1], "UTF-8")
                 val obj = org.json.JSONObject(json)
                 val token = obj.optString("сТокен", obj.optString("token", ""))
-                val expiry = obj.optLong("чПротухнетПосле", obj.optLong("expiration", 0))
+                var expiry = obj.optLong("чПротухнетПосле", obj.optLong("expiration", 0))
+                if (expiry in 1..9999999999L) expiry *= 1000 // s -> ms
                 if (token.isNotEmpty() && expiry > now) {
                     cachedToken = token
                     cachedExpiry = expiry
@@ -68,6 +69,13 @@ object TwitchIntegrityWebView {
                         webView = WebView(context.applicationContext).apply {
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.allowFileAccess = false
+                            settings.allowContentAccess = false
+                            settings.allowFileAccessFromFileURLs = false
+                            settings.allowUniversalAccessFromFileURLs = false
+                            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            try { settings.safeBrowsingEnabled = true } catch (_: Exception) {}
+                            try { CookieManager.getInstance().setAcceptThirdPartyCookies(this, false) } catch (_: Exception) {}
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     view?.postDelayed({
@@ -79,7 +87,8 @@ object TwitchIntegrityWebView {
                                                 val j = java.net.URLDecoder.decode(m2.groupValues[1], "UTF-8")
                                                 val o = org.json.JSONObject(j)
                                                 val t = o.optString("сТокен", o.optString("token", ""))
-                                                val exp = o.optLong("чПротухнетПосле", o.optLong("expiration", System.currentTimeMillis() + 3600*1000))
+                                                var exp = o.optLong("чПротухнетПосле", o.optLong("expiration", System.currentTimeMillis() + 3600*1000))
+                                                if (exp in 1..9999999999L) exp *= 1000
                                                 if (t.isNotEmpty()) {
                                                     cachedToken = t
                                                     cachedExpiry = exp
@@ -111,7 +120,6 @@ object TwitchIntegrityWebView {
 
                 cont.invokeOnCancellation {
                     handler.removeCallbacks(timeoutRunnable)
-                    handler.removeCallbacksAndMessages(null)
                     // destroy must run on Main thread
                     handler.post { safeDestroy() }
                 }

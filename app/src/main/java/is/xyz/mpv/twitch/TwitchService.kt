@@ -62,7 +62,8 @@ object TwitchService {
             prefs.getString("twitch_device_id", null)?.takeIf { it.isNotEmpty() }?.let { return it }
             val hex = UUID.randomUUID().toString().replace("-", "").take(16)
             val id = "0000000000000000$hex".take(32)
-            prefs.edit().putString("twitch_device_id", id).apply()
+            // commit for durability - once per install, must survive kill
+            prefs.edit().putString("twitch_device_id", id).commit()
             Log.v(TAG, "generated device id: $id")
             return id
         }
@@ -109,8 +110,8 @@ object TwitchService {
                 if (cached != null && System.currentTimeMillis() < cached.expiry) {
                     // add cache-bust p= param like player.js:5689 - strip existing p to avoid duplication
                     val base = cached.url.substringBefore("&p=").substringBefore("?p=")
-                    // cached url already contains ?, so append &p=
-                    return@withContext "$base&p=${Random.nextInt(0, 9999999)}"
+                    val sep = if ("?" in base) "&p=" else "?p="
+                    return@withContext "$base$sep${Random.nextInt(0, 9999999)}"
                 }
             }
         }
@@ -183,8 +184,25 @@ object TwitchService {
         // If Twitch starts rejecting, we fall back to WebView extraction (see TwitchIntegrityWebView).
         // For now try without; extension's gqltoken.js fetches via iframe but same token is optional for PlaybackAccessToken.
 
-        // Retry once on service timeout like player.js:5528 (5s + random) - suspend delay, not Thread.sleep
-        var resp = postJson("https://gql.twitch.tv/gql", body, headers, 8000)
+        // Retry on service timeout and 429/5xx with backoff
+        suspend fun safePost(body: String): String {
+            var last: Exception? = null
+            repeat(2) { attempt ->
+                try { return postJson("https://gql.twitch.tv/gql", body, headers, 8000) }
+                catch (e: Exception) {
+                    last = e
+                    val msg = e.message ?: ""
+                    val isRetryable = msg.contains("429") || msg.contains("50")
+                    if (attempt == 0 && isRetryable) {
+                        val backoff = 2000L + Random.nextLong(2000)
+                        Log.w(TAG, "GQL retryable $msg, backoff $backoff")
+                        delay(backoff)
+                    } else if (attempt == 0) throw e
+                }
+            }
+            throw last!!
+        }
+        var resp = safePost(body)
         var json = JSONObject(resp)
         if (json.has("errors")) {
             val errs = json.getJSONArray("errors")
@@ -242,6 +260,8 @@ object TwitchService {
         return PlaybackAccessToken(value, sig, channelId)
     }
 
+    private fun maskUrl(url: String) = url.replace(TOKEN_MASK_REGEX, "token=***").replace(SIG_MASK_REGEX, "sig=***")
+
     private fun postJson(urlStr: String, body: String, headers: Map<String,String>, timeoutMs: Int): String {
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
@@ -255,11 +275,13 @@ object TwitchService {
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                ?: throw RuntimeException("HTTP $code for $urlStr: no body")
+                ?: throw RuntimeException("HTTP $code for ${maskUrl(urlStr)}: no body")
             val resp = stream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
             if (code !in 200..299) {
-                Log.w(TAG, "HTTP $code for $urlStr: $resp")
-                throw RuntimeException("HTTP $code: $resp")
+                val retryAfter = conn.getHeaderField("Retry-After")?.toLongOrNull()
+                if (retryAfter != null) Log.w(TAG, "Retry-After $retryAfter for $urlStr")
+                Log.w(TAG, "HTTP $code for ${maskUrl(urlStr)}: $resp")
+                throw RuntimeException("HTTP $code for ${maskUrl(urlStr)}: $resp")
             }
             return resp
         } finally {
@@ -298,7 +320,7 @@ object TwitchService {
             val code = conn.responseCode
             if (code !in 200..299) {
                 val err = conn.errorStream?.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() } ?: ""
-                throw RuntimeException("HTTP $code fetching $urlStr: $err")
+                throw RuntimeException("HTTP $code fetching ${maskUrl(urlStr)}: $err")
             }
             return conn.inputStream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
         } finally {
@@ -362,8 +384,8 @@ object TwitchService {
                     else -> "variant_${variants.size}"
                 }
                 val display = nameFromGroup ?: id
-                // audio_only detection: GROUP-ID audio_only or name contains Audio
-                val isAudio = id == "audio_only" || display.equals("Audio Only", ignoreCase = true) || display.lowercase().contains("audio")
+                // audio_only detection: strict GROUP-ID only
+                val isAudio = id == "audio_only" || videoId == "audio_only"
                 val fpsHint = when {
                     fps != 0.0 -> fps
                     display.contains("60") -> 60.0
@@ -394,7 +416,7 @@ object TwitchService {
         val out = mutableMapOf<String, String>()
         for (m in ATTR_REGEX.findAll(src)) {
             val k = m.groupValues[1]
-            val v = if (m.groupValues[2].isNotEmpty() || src.contains("$k=\"")) m.groupValues[2] else m.groupValues[3]
+            val v = if (m.value.contains("\"")) m.groupValues[2] else m.groupValues[3]
             out[k] = v
         }
         return out
@@ -521,9 +543,8 @@ object TwitchService {
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
                     val data = obj.optJSONObject("data")?.optJSONObject("user")
-                    // validate login mapping, fallback to chunk order
                     val loginFromData = data?.optString("login")?.lowercase()?.takeIf { it.isNotBlank() }
-                    val login = loginFromData?.takeIf { chunk.contains(it) } ?: chunk.getOrNull(i) ?: continue
+                    val login = loginFromData?.takeIf { chunk.contains(it) } ?: continue
                     val icon = data?.optString("profileImageURL")?.takeIf { it.isNotBlank() }
                     val stream = data?.optJSONObject("stream")
                     val isOnline = stream != null && !stream.isNull("id")
@@ -552,11 +573,10 @@ object TwitchService {
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                ?: throw RuntimeException("HTTP $code: no body")
+                ?: throw RuntimeException("HTTP $code for ${maskUrl(urlStr)}: no body")
             val resp = stream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
-            if (code !in 200..299) throw RuntimeException("HTTP $code: $resp")
+            if (code !in 200..299) throw RuntimeException("HTTP $code for ${maskUrl(urlStr)}: $resp")
             return resp
         } finally { conn.disconnect() }
     }
-}
 }

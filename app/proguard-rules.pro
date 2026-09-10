@@ -1,4 +1,9 @@
 -dontobfuscate
+-keepattributes Signature,InnerClasses,EnclosingMethod,*Annotation*
+-dontwarn com.bumptech.glide.**
+-dontwarn android.support.v4.media.**
+-keep class androidx.media.** { *; }
+-keep class android.support.v4.media.** { *; }
 
 # for JNI interfacing
 -keep class is.xyz.mpv.MPVLib {

@@ -61,7 +61,8 @@ class TwitchQualityDialog(
     }
 
     private fun applyQuality(v: TwitchService.Variant) {
-        Log.v("TwitchQuality", "switch to ${v.id} ${v.url}")
+        val safe = v.url.replace(Regex("token=[^&\\s]+"), "token=***").replace(Regex("sig=[^&\\s]+"), "sig=***")
+        Log.v("TwitchQuality", "switch to ${v.id} $safe")
         try {
             if (v.isAudioOnly) {
                 // Most power efficient: disable video decoding entirely
@@ -105,22 +106,24 @@ class TwitchQualityDialog(
             onReady: (List<TwitchService.Variant>, String) -> Unit,
             onError: (String) -> Unit
         ) {
-            val loading = AlertDialog.Builder(context)
-                .setTitle("Quality")
-                .setMessage("Fetching variants…")
-                .setCancelable(false)
-                .create()
-            loading.show()
-            val job = scope.launch {
-                try {
-                    val vars = TwitchService.fetchVariants(masterUrl)
-                    try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
-                    if (vars.isEmpty()) onError("No variants")
-                    else onReady(vars, masterUrl)
-                } catch (e: Exception) {
-                    try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
-                    onError(e.message ?: "fetch failed")
-                }
+            if (context is android.app.Activity && (context.isFinishing || context.isDestroyed)) return
+            val loading = try {
+                AlertDialog.Builder(context)
+                    .setTitle("Quality")
+                    .setMessage("Fetching variants…")
+                    .setCancelable(false)
+                    .create().also { it.show() }
+            } catch (_: Exception) { return }
+            val job = scope.launch(CoroutineExceptionHandler { _, e ->
+                Log.w("TwitchQuality", "fetch failed", e)
+                try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
+                val safe = e.message?.replace(Regex("token=[^&\\s]+"), "token=***")?.replace(Regex("sig=[^&\\s]+"), "sig=***") ?: "fetch failed"
+                onError(safe)
+            }) {
+                val vars = TwitchService.fetchVariants(masterUrl)
+                try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
+                if (vars.isEmpty()) onError("No variants")
+                else onReady(vars, masterUrl)
             }
             job.invokeOnCompletion {
                 try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
