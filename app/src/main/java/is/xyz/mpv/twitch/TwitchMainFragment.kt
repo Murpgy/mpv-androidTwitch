@@ -290,10 +290,11 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                 if (isAudioEff || effectiveQuality != "chunked") {
                     try {
                         val variants = TwitchService.fetchVariants(master)
-                        val chosen = variants.find { it.id == effectiveQuality } ?: variants.find { it.isAudioOnly } ?: variants.firstOrNull()
+                        val chosen = TwitchService.findBestVariant(variants, effectiveQuality) ?: variants.firstOrNull()
                         val targetUrl = chosen?.url ?: master
+                        val isAudioChosen = chosen?.isAudioOnly == true
                         if (dlg.isShowing) dlg.dismiss()
-                        launchPlayer(channel, targetUrl, master, isAudioOnly = isAudioEff)
+                        launchPlayer(channel, targetUrl, master, isAudioOnly = isAudioChosen)
                     } catch (e: Exception) {
                         Log.w("TwitchMain", "variant fetch failed, falling back to master", e)
                         if (dlg.isShowing) dlg.dismiss()

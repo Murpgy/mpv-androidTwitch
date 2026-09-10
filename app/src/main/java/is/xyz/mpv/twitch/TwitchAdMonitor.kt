@@ -153,16 +153,8 @@ class TwitchAdMonitor(
     }
 
     private fun selectVariant(variants: List<TwitchService.Variant>, prefId: String): TwitchService.Variant? {
-        // Mirror player.js:выбратьВариантТрансляции
-        var v = variants.find { it.id == prefId }
-        if (v != null) return v
-        if (prefId == "chunked" || prefId == "audio_only") {
-            return variants.firstOrNull()
-        }
-        // try bitrate fallback: find variant with bandwidth <= saved
-        // For mpv parity we just pick highest non-audio for video, or source
-        return variants.firstOrNull { !it.isAudioOnly && it.id != "audio_only" }
-            ?: variants.firstOrNull()
+        // Use fps-equivalent fallback: 720p <-> 720p60 (user request)
+        return TwitchService.findBestVariant(variants, prefId)
     }
 
     // Lightweight GET for media playlist (small, ~2KB)

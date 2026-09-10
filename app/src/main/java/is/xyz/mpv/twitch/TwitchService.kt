@@ -373,6 +373,34 @@ object TwitchService {
         }.thenByDescending { it.bandwidth })
     }
 
+    /**
+     * Find best variant for preferredId with fps-equivalent fallback:
+     * if 720p (30) not found, try 720p60 and vice versa. Then nearest height.
+     * Mirrors extension's fallback and user request: try equivalent before lower.
+     */
+    fun findBestVariant(variants: List<Variant>, preferredId: String): Variant? {
+        if (variants.isEmpty()) return null
+        // 1. exact
+        variants.find { it.id == preferredId }?.let { return it }
+        // 2. fps-equivalent: 720p <-> 720p60, 1080p <-> 1080p60
+        val equiv = when {
+            preferredId.endsWith("p60") -> preferredId.removeSuffix("60") // 720p60 -> 720p
+            Regex("^\\d+p$").matches(preferredId) -> "${preferredId}60" // 720p -> 720p60
+            else -> null
+        }
+        if (equiv != null) variants.find { it.id == equiv }?.let { return it }
+        // 3. same height nearest: parse height from preferredId (e.g. 720)
+        val prefHeight = Regex("(\\d+)p").find(preferredId)?.groupValues?.get(1)?.toIntOrNull()
+        if (prefHeight != null) {
+            // Prefer same height, any fps, highest bandwidth
+            variants.filter { it.height == prefHeight }.maxByOrNull { it.bandwidth }?.let { return it }
+            // Same height prefix contains? e.g. 720p variants include both
+            variants.filter { it.id.startsWith("${prefHeight}p") }.maxByOrNull { it.bandwidth }?.let { return it }
+        }
+        // 4. fallback to highest non-audio
+        return variants.firstOrNull { !it.isAudioOnly } ?: variants.firstOrNull()
+    }
+
     private fun resolveUrl(relative: String, base: String): String {
         return try {
             URL(URL(base), relative).toString()
