@@ -85,30 +85,47 @@ jobs:
           # Without a secret, Gradle produces *-unsigned.apk which Android 15 rejects
           # (INSTALL_PARSE_FAILED_NO_CERTIFICATES -> "package appears to be invalid").
           # Fix: always sign - use real key if provided, else generate ephemeral CI key and sign.
-          set -e
-          BT_VER=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          set -x
+          # Find apksigner robustly (ANDROID_HOME vs ANDROID_SDK_ROOT)
+          BT_VER=$(ls "$ANDROID_HOME/build-tools" 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$BT_VER" ]; then BT_VER=$(ls "$ANDROID_SDK_ROOT/build-tools" 2>/dev/null | sort -V | tail -n1); fi
+          echo "build-tools version: $BT_VER"
           APS="$ANDROID_HOME/build-tools/$BT_VER/apksigner"
+          if [ ! -x "$APS" ]; then APS="$ANDROID_SDK_ROOT/build-tools/$BT_VER/apksigner"; fi
+          ls -l "$APS" || true
+          hasUnsigned=false
+          if compgen -G "app/build/outputs/apk/default/release/*-unsigned.apk" > /dev/null 2>&1; then hasUnsigned=true; fi
+          if compgen -G "app/build/outputs/apk/allstorage/release/*-unsigned.apk" > /dev/null 2>&1; then hasUnsigned=true; fi
           if [ -n "$ANDROID_SIGNING_KEY" ] && [ -f "$ANDROID_SIGNING_KEY" ]; then
             echo "Signing with provided ANDROID_SIGNING_KEY..."
             for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
               [ -f "$f" ] || continue
-              out="${f/-unsigned/-signed}"; "$APS" sign --ks "$ANDROID_SIGNING_KEY" --in "$f" --out "$out" && echo "signed $out"
+              out="${f/-unsigned/-signed}"
+              "$APS" sign --ks "$ANDROID_SIGNING_KEY" --in "$f" --out "$out" && echo "signed $out" || { echo "apksigner failed for $f"; exit 1; }
             done
-          elif ls app/build/outputs/apk/default/release/*-unsigned.apk 1>/dev/null 2>&1; then
-            echo "No signing key - generating ephemeral CI keystore and signing unsigned APKs..."
-            keytool -genkeypair -keystore /tmp/ci.jks -storepass ci -keypass ci -alias ci -dname "CN=CI, OU=CI, O=CI" -validity 10000 -keyalg RSA -keysize 2048 -sigalg SHA256withRSA >/dev/null 2>&1
+          elif [ "$hasUnsigned" = true ]; then
+            echo "No signing key - generating ephemeral CI keystore..."
+            rm -f /tmp/ci.jks
+            keytool -genkeypair -keystore /tmp/ci.jks -storepass ci -keypass ci -alias ci -dname "CN=CI, OU=CI, O=CI" -validity 10000 -keyalg RSA -keysize 2048
+            echo "keystore created: $(ls -lh /tmp/ci.jks)"
             for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
               [ -f "$f" ] || continue
-              out="${f/-unsigned/-signed}"; "$APS" sign --ks /tmp/ci.jks --ks-pass pass:ci --ks-key-alias ci --key-pass pass:ci --in "$f" --out "$out" && echo "signed $out (ephemeral)"
-              # replace unsigned with signed for artifact upload clarity
+              out="${f/-unsigned/-signed}"
+              echo "Signing $f -> $out"
+              "$APS" sign --ks /tmp/ci.jks --ks-pass pass:ci --ks-key-alias ci --key-pass pass:ci --in "$f" --out "$out" || { echo "apksigner failed for $f"; exit 1; }
+              echo "signed $out (ephemeral)"
               rm -f "$f"
             done
-            # Also ensure bundle if built gets at least debug signed (optional)
           else
             echo "No unsigned APKs to sign (already signed)"
           fi
-          # verify
-          for f in app/build/outputs/apk/default/release/*.apk app/build/outputs/apk/allstorage/release/*.apk; do [ -f "$f" ] && "$APS" verify --verbose "$f" 2>&1 | head -n 5 || true; done
+          echo "Verifying..."
+          for f in app/build/outputs/apk/default/release/*.apk app/build/outputs/apk/allstorage/release/*.apk; do
+            [ -f "$f" ] || continue
+            echo "verify $f"
+            "$APS" verify --verbose "$f" 2>&1 | head -n 20 || true
+          done
+          echo "Done signing"
 
       - name: Show release outputs (after signing)
         run: |
