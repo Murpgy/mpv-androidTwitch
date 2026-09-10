@@ -39,42 +39,47 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     private lateinit var adapter: ChannelAdapter
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        binding = FragmentTwitchMainBinding.bind(view)
-        Utils.handleInsetsAsPadding(binding.root)
+        try {
+            binding = FragmentTwitchMainBinding.bind(view)
+            Utils.handleInsetsAsPadding(binding.root)
 
-        adapter = ChannelAdapter(
-            onClick = { channel -> playChannel(channel) },
-            onLongClick = { channel -> showChannelOptions(channel) }
-        )
+            adapter = ChannelAdapter(
+                onClick = { channel -> playChannel(channel) },
+                onLongClick = { channel -> showChannelOptions(channel) }
+            )
 
-        binding.recycler.layoutManager = LinearLayoutManager(requireContext())
-        binding.recycler.adapter = adapter
+            binding.recycler.layoutManager = LinearLayoutManager(requireContext())
+            binding.recycler.adapter = adapter
 
-        binding.addBtn.setOnClickListener { showAddDialog() }
-        binding.settingsBtn.setOnClickListener {
-            startActivity(Intent(context, `is`.xyz.mpv.preferences.PreferenceActivity::class.java))
+            binding.addBtn.setOnClickListener { showAddDialog() }
+            binding.settingsBtn.setOnClickListener {
+                startActivity(Intent(context, `is`.xyz.mpv.preferences.PreferenceActivity::class.java))
+            }
+            binding.urlBtn.setOnClickListener {
+                val helper = Utils.OpenUrlDialog(requireContext())
+                with(helper) { builder.setPositiveButton(R.string.dialog_ok) { _, _ -> playUrl(helper.text) }
+                    builder.setNegativeButton(R.string.dialog_cancel) { d,_ -> d.cancel() }; create().show() }
+            }
+
+            // audio-only switch reflects mpv background + power saver
+            val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+            binding.audioOnlySwitch.isChecked = prefs.getBoolean("twitch_audio_only", false)
+            binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("twitch_audio_only", checked).apply()
+                Toast.makeText(requireContext(), if(checked) "Audio-only: max battery" else "Video enabled", Toast.LENGTH_SHORT).show()
+            }
+
+            binding.swipeRefresh.setOnRefreshListener { refreshList() }
+            // quick open twitch
+            binding.openTwitchBtn.setOnClickListener {
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/directory"))) } catch (_: Exception) {}
+            }
+
+            refreshList()
+        } catch (e: Exception) {
+            Log.e("TwitchMain", "onViewCreated failed", e)
+            Toast.makeText(requireContext(), "Twitch UI init failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
-        binding.urlBtn.setOnClickListener {
-            val helper = Utils.OpenUrlDialog(requireContext())
-            with(helper) { builder.setPositiveButton(R.string.dialog_ok) { _, _ -> playUrl(helper.text) }
-                builder.setNegativeButton(R.string.dialog_cancel) { d,_ -> d.cancel() }; create().show() }
-        }
-
-        // audio-only switch reflects mpv background + power saver
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        binding.audioOnlySwitch.isChecked = prefs.getBoolean("twitch_audio_only", false)
-        binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean("twitch_audio_only", checked).apply()
-            Toast.makeText(requireContext(), if(checked) "Audio-only: max battery" else "Video enabled", Toast.LENGTH_SHORT).show()
-        }
-
-        binding.swipeRefresh.setOnRefreshListener { refreshList() }
-        // quick open twitch
-        binding.openTwitchBtn.setOnClickListener {
-            try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/directory"))) } catch (_: Exception) {}
-        }
-
-        refreshList()
     }
 
     override fun onResume() {

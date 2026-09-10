@@ -35,16 +35,16 @@
         android:orientation="horizontal"
         android:gravity="center_vertical">
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
+        <androidx.appcompat.widget.SwitchCompat
             android:id="@+id/audioOnlySwitch"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
             android:text="Audio only \u00b7 battery saver" />
 
-        <com.google.android.material.button.MaterialButton
+        <Button
             android:id="@+id/openTwitchBtn"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+            style="@style/Widget.AppCompat.Button.Colored"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Browse" />
@@ -75,27 +75,28 @@
         android:gravity="center"
         android:paddingTop="8dp">
 
-        <com.google.android.material.floatingactionbutton.FloatingActionButton
+        <ImageButton
             android:id="@+id/addBtn"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Add streamer"
-            app:srcCompat="@android:drawable/ic_input_add" />
+            android:src="@android:drawable/ic_input_add" />
 
         <View android:layout_width="16dp" android:layout_height="0dp"/>
 
-        <com.google.android.material.button.MaterialButton
+        <Button
             android:id="@+id/urlBtn"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+            style="@style/Widget.AppCompat.Button.Colored"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Open URL" />
 
         <View android:layout_width="8dp" android:layout_height="0dp"/>
 
-        <com.google.android.material.button.MaterialButton
+        <Button
             android:id="@+id/settingsBtn"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+            style="@style/Widget.AppCompat.Button.Colored"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Settings" />
