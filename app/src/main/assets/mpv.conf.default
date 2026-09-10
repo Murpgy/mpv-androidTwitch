@@ -1,0 +1,20 @@
+# TwitchMPV mpv.conf - default template (from advanced default.txt)
+# Shown when mpv.conf does not exist. Edit and Save to apply.
+# For Twitch background audio, profile=fast + hwdec already set by app; below is aggressive battery saver.
+profile=fast
+vo=mediacodec_embed,gpu
+gpu-context=android
+hwdec=mediacodec,mediacodec-copy
+hwdec-codecs=h264,hevc,mpeg4,mpeg2video,vp8,vp9
+
+scale=bilinear
+cscale=bilinear
+dscale=bilinear
+deband=no
+dither=no
+interpolation=no
+video-sync=audio
+framedrop=vo
+vd-lavc-skiploopfilter=all
+vd-lavc-fast
+deinterlace=no

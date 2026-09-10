@@ -46,8 +46,20 @@ class ConfigEditDialogPreference(
     }
 
     private fun setupViews() {
-        if (configFile.exists())
+        if (configFile.exists()) {
             binding.editText.setText(configFile.readText())
+        } else if (configFile.name == "mpv.conf") {
+            // Show sane default template from assets (advanced default.txt) when file doesn't exist
+            val defaultText = try {
+                context.assets.open("mpv.conf.default").bufferedReader().readText()
+            } catch (_: Exception) {
+                // fallback minimal sane default (app already sets profile=fast/hwdec via code)
+                "# mpv.conf - empty uses app defaults (balanced)\n# Uncomment for max battery:\n# profile=fast\n# hwdec=mediacodec,mediacodec-copy\n"
+            }
+            binding.editText.setText(defaultText)
+            // mark as unsaved so user knows Save is needed to persist
+            binding.editText.setSelection(0)
+        }
         binding.editText.doOnTextChanged { _, _, _, _ -> setUnsaved(true) }
     }
 
