@@ -57,6 +57,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import `is`.xyz.mpv.twitch.TwitchService
 import `is`.xyz.mpv.twitch.TwitchQualityDialog
+import `is`.xyz.mpv.twitch.TwitchAdMonitor
 
 typealias ActivityResultCallback = (Int, Intent?) -> Unit
 typealias StateRestoreCallback = () -> Unit
@@ -196,6 +197,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var twitchMasterUrl: String? = null
     private var twitchVariants: List<TwitchService.Variant> = emptyList()
     private var twitchCurrentVariantUrl: String? = null
+    private var twitchAdMonitor: `is`.xyz.mpv.twitch.TwitchAdMonitor? = null
     /* * */
 
     @SuppressLint("ClickableViewAccessibility")
@@ -362,19 +364,43 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             }
         }
 
-        // Pre-fetch variants for live quality switching
+        // Pre-fetch variants for live quality switching + start ad-aware monitor (parity with original dual-list)
         twitchChannel?.let { ch ->
             val master = twitchMasterUrl ?: filepath
+            // Fetch variants for UI immediately
             lifecycleScope.launch {
                 try {
                     val vars = TwitchService.fetchVariants(master)
                     twitchVariants = vars
                     Log.v(TAG, "Twitch variants for $ch: ${vars.map { it.id }}")
-                    // if audio-only was requested but variant list has better audio_only URL, we already used it
                 } catch (e: Exception) {
                     Log.w(TAG, "failed to fetch variants for $ch", e)
                 }
             }
+            // Start performant ad monitor: polls site media, auto-switches to picture-by-picture when ad
+            // Same practical effect as original ОбновлениеСписковСРекламой/БезРекламы but via mpv loadfile
+            try {
+                val prefs = getDefaultSharedPreferences(this)
+                val prefQuality = prefs.getString("twitch_last_quality_$ch", "chunked") ?: "chunked"
+                // Pre-warm noAd master (picture-by-picture) lazily
+                lifecycleScope.launch {
+                    var noAdMaster: String? = null
+                    try { noAdMaster = TwitchService.getHlsMasterUrl(this@MPVActivity, ch, withoutAds = true) } catch (_: Exception) {}
+                    twitchAdMonitor = TwitchAdMonitor(this@MPVActivity, ch, prefQuality, { newUrl, reason, isAudio ->
+                        Log.i(TAG, "AdMonitor switch $reason -> $newUrl")
+                        runOnUiThread {
+                            try {
+                                // keep selection for next switch
+                                twitchCurrentVariantUrl = newUrl
+                                if (isAudio) MPVLib.setPropertyString("vid", "no") else if (MPVLib.getPropertyString("vid") == "no") MPVLib.setPropertyString("vid", "auto")
+                                MPVLib.command(arrayOf("loadfile", newUrl, "replace"))
+                                showToast(if (reason == "ad_start") "Skipping ad (battery saver)" else "Ad ended - resuming", true)
+                            } catch (e: Exception) { Log.w(TAG, "ad switch failed", e) }
+                        }
+                    }, lifecycleScope)
+                    twitchAdMonitor?.start(master, noAdMaster)
+                }
+            } catch (e: Exception) { Log.w(TAG, "ad monitor start failed", e) }
         }
 
         updateScreenBrightness()
@@ -429,6 +455,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             AudioManagerCompat.abandonAudioFocusRequest(audioManager!!, it)
         }
         audioFocusRequest = null
+
+        // Stop Twitch ad monitor (dual-list parity)
+        twitchAdMonitor?.stop()
+        twitchAdMonitor = null
 
         // take the background service with us
         stopServiceRunnable.run()
