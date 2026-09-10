@@ -106,13 +106,14 @@ jobs:
           elif [ "$hasUnsigned" = true ]; then
             echo "No signing key - generating ephemeral CI keystore..."
             rm -f /tmp/ci.jks
-            keytool -genkeypair -keystore /tmp/ci.jks -storepass ci -keypass ci -alias ci -dname "CN=CI, OU=CI, O=CI" -validity 10000 -keyalg RSA -keysize 2048
+            # keytool requires >=6 char passwords (ci fails) - use android
+            keytool -genkeypair -keystore /tmp/ci.jks -storepass android -keypass android -alias ci -dname "CN=CI, OU=CI, O=CI" -validity 10000 -keyalg RSA -keysize 2048
             echo "keystore created: $(ls -lh /tmp/ci.jks)"
             for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
               [ -f "$f" ] || continue
               out="${f/-unsigned/-signed}"
               echo "Signing $f -> $out"
-              "$APS" sign --ks /tmp/ci.jks --ks-pass pass:ci --ks-key-alias ci --key-pass pass:ci --in "$f" --out "$out" || { echo "apksigner failed for $f"; exit 1; }
+              "$APS" sign --ks /tmp/ci.jks --ks-pass pass:android --ks-key-alias ci --key-pass pass:android --in "$f" --out "$out" || { echo "apksigner failed for $f"; exit 1; }
               echo "signed $out (ephemeral)"
               rm -f "$f"
             done
