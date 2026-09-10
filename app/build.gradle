@@ -8,11 +8,13 @@ android {
     compileSdk = 36
 
     defaultConfig {
+        // Changed package name from original is.xyz.mpv to avoid collision (Twitch fork)
+        applicationId "is.xyz.mpv.twitch"
         minSdkVersion 23
         targetSdk 36
 
-        versionCode 47
-        versionName "2026-08-11-release"
+        versionCode 48
+        versionName "1.0-twitch-2026.09.10"
 
         vectorDrawables.useSupportLibrary = true
 
@@ -43,9 +45,21 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled = true
-            shrinkResources = true
+            // Well-optimized production build for Twitch foreground audio (hours of battery saving)
+            minifyEnabled true
+            shrinkResources true
+            crunchPngs true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // R8 full mode already enabled via proguard-android-optimize
+            isDebuggable false
+            isJniDebuggable false
+            // keep symbol table minimal for size; change to NONE if you want smallest APK
+            ndk { debugSymbolLevel 'SYMBOL_TABLE' }
+            // zipAlign is default true for release
+        }
+        debug {
+            // keep debug debuggable but still shrink a bit for faster installs
+            isDebuggable true
         }
     }
 
@@ -87,4 +101,7 @@ dependencies {
     implementation 'androidx.media:media:1.8.0'
     implementation 'androidx.preference:preference-ktx:1.2.1'
     implementation 'com.google.android.material:material:1.14.0'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.9.2'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }

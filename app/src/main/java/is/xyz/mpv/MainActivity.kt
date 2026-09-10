@@ -9,14 +9,12 @@ class MainActivity : AppCompatActivity(R.layout.activity_main) {
 
         supportActionBar?.setTitle(R.string.mpv_activity)
 
-        // The original plan was to have the file/doc picker live as fragments
-        // under here but that requires refactoring I'm really not willing to figure out now.
-        // ~sfan5, 2022-06-30
-
         if (savedInstanceState == null) {
+            val useTwitch = true // Twitch-first: watching Twitch is main priority
             with (supportFragmentManager.beginTransaction()) {
                 setReorderingAllowed(true)
-                add(R.id.fragment_container_view, MainScreenFragment())
+                if (useTwitch) add(R.id.fragment_container_view, `is`.xyz.mpv.twitch.TwitchMainFragment())
+                else add(R.id.fragment_container_view, MainScreenFragment())
                 commit()
             }
         }

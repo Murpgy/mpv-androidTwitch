@@ -3,8 +3,8 @@
      them to be changed based on the locale and options. -->
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <!-- Simple strings. -->
-    <string name="mpv_activity">mpv</string>
-    <string name="label_share_intent">Play in mpv</string>
+    <string name="mpv_activity">TwitchMPV</string>
+    <string name="label_share_intent">Play in TwitchMPV</string>
     <string name="title_activity_settings">Settings</string>
     <string name="dialog_ok">OK</string>
     <string name="dialog_cancel">Cancel</string>
@@ -116,7 +116,7 @@
 
     <string name="pref_background_play_title">Background playback</string>
     <string name="pref_background_play_summary">Decide when playback should be automatically resumed background.</string>
-    <string name="pref_background_play_default" translatable="false">never</string>
+    <string name="pref_background_play_default" translatable="false">audio-only</string>
 
     <string name="pref_save_position_title">Save position on quit</string>
     <string name="pref_save_position_summary">Remember current playback position on exit. When the same file is played again mpv will seek to the previous position.</string>

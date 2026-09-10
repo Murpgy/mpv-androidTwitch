@@ -53,6 +53,10 @@ import androidx.media.AudioManagerCompat
 import java.io.File
 import java.lang.IllegalArgumentException
 import kotlin.math.roundToInt
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import `is`.xyz.mpv.twitch.TwitchService
+import `is`.xyz.mpv.twitch.TwitchQualityDialog
 
 typealias ActivityResultCallback = (Int, Intent?) -> Unit
 typealias StateRestoreCallback = () -> Unit
@@ -186,6 +190,12 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var newIntentReplace = false
 
     private var smoothSeekGesture = false
+
+    // Twitch-specific
+    private var twitchChannel: String? = null
+    private var twitchMasterUrl: String? = null
+    private var twitchVariants: List<TwitchService.Variant> = emptyList()
+    private var twitchCurrentVariantUrl: String? = null
     /* * */
 
     @SuppressLint("ClickableViewAccessibility")
@@ -214,6 +224,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             prevBtn.setOnLongClickListener { openPlaylistMenu(pauseForDialog()); true }
             nextBtn.setOnLongClickListener { openPlaylistMenu(pauseForDialog()); true }
             cycleDecoderBtn.setOnLongClickListener { pickDecoder(); true }
+            twitchQualityBtn.setOnClickListener { showTwitchQualityPicker() }
+            twitchQualityBtn.setOnLongClickListener { toggleTwitchAudioOnly(); true }
 
             playbackSeekbar.setOnSeekBarChangeListener(seekBarChangeListener)
         }
@@ -302,6 +314,29 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             return
         }
 
+        // Twitch extras
+        val twitchCh = intent.getStringExtra("twitch_channel") ?: intent.getStringExtra("filepath")?.let {
+            Regex("twitch\\.tv/([a-z0-9_]+)").find(it)?.groupValues?.get(1)
+        }
+        twitchChannel = twitchCh?.lowercase()
+        twitchMasterUrl = intent.getStringExtra("twitch_master_url")
+        val isAudioOnly = intent.getBooleanExtra("twitch_is_audio_only", false)
+        if (twitchChannel != null) {
+            twitchCurrentVariantUrl = filepath
+            // title for notification
+            intent.getStringExtra("title")?.let { t ->
+                // will be picked up via media-title; also force
+                onloadCommands.add(arrayOf("set", "file-local-options/force-media-title", t))
+            }
+            // power optimization: audio-only -> disable video early
+            if (isAudioOnly) {
+                onloadCommands.add(arrayOf("set", "file-local-options/vid", "no"))
+                // also hint vo null to avoid surface attach when possible
+                // keep hwdec off for audio
+                Log.v(TAG, "Twitch audio-only mode: vid=no for $twitchChannel")
+            }
+        }
+
         player.addObserver(this)
         player.initialize(filesDir.path, cacheDir.path)
         player.playFile(filepath)
@@ -312,6 +347,21 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             mediaToken = mediaSession?.sessionToken
             thumbnailChanged = {
                 updateMediaSession()
+            }
+        }
+
+        // Pre-fetch variants for live quality switching
+        twitchChannel?.let { ch ->
+            val master = twitchMasterUrl ?: filepath
+            lifecycleScope.launch {
+                try {
+                    val vars = TwitchService.fetchVariants(master)
+                    twitchVariants = vars
+                    Log.v(TAG, "Twitch variants for $ch: ${vars.map { it.id }}")
+                    // if audio-only was requested but variant list has better audio_only URL, we already used it
+                } catch (e: Exception) {
+                    Log.w(TAG, "failed to fetch variants for $ch", e)
+                }
             }
         }
 
@@ -1327,6 +1377,81 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         }
     }
 
+    // Twitch: live quality switching + audio-only toggle (battery saver)
+    private fun showTwitchQualityPicker() {
+        if (twitchChannel == null) {
+            showToast("Not a Twitch stream")
+            return
+        }
+        val restore = pauseForDialog()
+        val master = twitchMasterUrl ?: MPVLib.getPropertyString("path") ?: run { restore(); return }
+        // if we already have variants, show dialog instantly; else fetch
+        if (twitchVariants.isNotEmpty()) {
+            TwitchQualityDialog(this, twitchVariants, twitchCurrentVariantUrl, lifecycleScope) { chosen ->
+                twitchCurrentVariantUrl = chosen.url
+                // persist default preference
+                getDefaultSharedPreferences(this).edit().putString("twitch_last_quality_${twitchChannel}", chosen.id).apply()
+            }.show()
+            // dialog handles restore via its own dismiss; ensure restore called after
+            // we cheat: restore immediately after show - quality switch will resume playback via loadfile replace
+            restore()
+        } else {
+            TwitchQualityDialog.showLoadingAndFetch(this, master, lifecycleScope,
+                onReady = { vars, url ->
+                    twitchVariants = vars
+                    twitchMasterUrl = url
+                    restore()
+                    TwitchQualityDialog(this, vars, twitchCurrentVariantUrl, lifecycleScope) { chosen ->
+                        twitchCurrentVariantUrl = chosen.url
+                        getDefaultSharedPreferences(this).edit().putString("twitch_last_quality_${twitchChannel}", chosen.id).apply()
+                    }.show()
+                },
+                onError = { err ->
+                    restore()
+                    showToast("Quality fetch failed: $err")
+                }
+            )
+            // don't restore yet - loading dialog keeps pause
+        }
+    }
+
+    private fun toggleTwitchAudioOnly() {
+        if (twitchChannel == null) {
+            showToast("Not a Twitch stream")
+            return
+        }
+        val isCurrentlyAudioOnly = (MPVLib.getPropertyString("vid") == "no") || twitchCurrentVariantUrl?.let { u -> twitchVariants.firstOrNull { it.url==u }?.isAudioOnly } == true
+        lifecycleScope.launch {
+            try {
+                val master = twitchMasterUrl ?: MPVLib.getPropertyString("path") ?: return@launch
+                val vars = if (twitchVariants.isNotEmpty()) twitchVariants else TwitchService.fetchVariants(master).also { twitchVariants = it }
+                if (isCurrentlyAudioOnly) {
+                    // switch back to source
+                    val src = vars.firstOrNull { it.isSource } ?: vars.firstOrNull { !it.isAudioOnly } ?: return@launch
+                    MPVLib.setPropertyString("vid", "auto")
+                    MPVLib.command(arrayOf("loadfile", src.url, "replace"))
+                    twitchCurrentVariantUrl = src.url
+                    showToast("Video restored: ${src.displayLabel()}")
+                } else {
+                    val audio = vars.firstOrNull { it.isAudioOnly }
+                    if (audio != null) {
+                        MPVLib.setPropertyString("vid", "no")
+                        MPVLib.command(arrayOf("loadfile", audio.url, "replace"))
+                        twitchCurrentVariantUrl = audio.url
+                        showToast("Audio only \u00b7 battery saver")
+                    } else {
+                        // fallback: just disable video without reload
+                        MPVLib.setPropertyString("vid", "no")
+                        showToast("Audio only (vid=no) \u00b7 battery saver")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "toggle audio-only failed", e)
+                showToast("Toggle failed: ${e.message}")
+            }
+        }
+    }
+
     private fun goIntoPiP() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N)
             return
@@ -1450,6 +1575,11 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 MenuItem(R.id.chapterNext) {
                     MPVLib.command(arrayOf("add", "chapter", "1")); true
                 },
+                MenuItem(R.id.twitchQualityBtn) {
+                    restoreState()
+                    showTwitchQualityPicker()
+                    false
+                },
                 MenuItem(R.id.advancedBtn) { openAdvancedMenu(restoreState); false },
                 MenuItem(R.id.orientationBtn) {
                     autoRotationMode = "manual"
@@ -1460,6 +1590,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         if (!isPlayingAudio)
             hiddenButtons.add(R.id.backgroundBtn)
+        if (twitchChannel == null)
+            hiddenButtons.add(R.id.twitchQualityBtn)
         if ((MPVLib.getPropertyInt("chapter-list/count") ?: 0) == 0)
             hiddenButtons.add(R.id.rowChapter)
         /******/
@@ -1684,14 +1816,39 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         window.attributes = lp
     }
 
+    private fun updateTwitchQualityBtn() {
+        // show quality button only for Twitch streams, tint if audio-only
+        val btn = binding.twitchQualityBtn
+        if (twitchChannel == null) {
+            btn.visibility = View.GONE
+            return
+        }
+        btn.visibility = View.VISIBLE
+        val isAudioOnly = MPVLib.getPropertyString("vid") == "no"
+        // tint battery saver green when audio only
+        val color = if (isAudioOnly) ContextCompat.getColor(this, android.R.color.holo_green_light)
+                    else ContextCompat.getColor(this, R.color.tint_normal)
+        btn.imageTintList = ColorStateList.valueOf(color)
+    }
+
     private fun updateMetadataDisplay() {
         if (!useAudioUI) {
             if (showMediaTitle)
                 binding.fullTitleTextView.text = psc.meta.formatTitle()
+            else if (twitchChannel != null) {
+                // Twitch: always show channel as title even without pref
+                binding.fullTitleTextView.text = twitchChannel
+                if (!twitchChannel.isNullOrEmpty()) {
+                    binding.controlsTitleGroup.visibility = View.VISIBLE
+                    // ensure fullTitle is visible
+                    binding.fullTitleTextView.visibility = View.VISIBLE
+                }
+            }
         } else {
-            binding.titleTextView.text = psc.meta.formatTitle()
-            binding.minorTitleTextView.text = psc.meta.formatArtistAlbum()
+            binding.titleTextView.text = psc.meta.formatTitle() ?: twitchChannel
+            binding.minorTitleTextView.text = psc.meta.formatArtistAlbum() ?: "Twitch \u00b7 ${twitchChannel ?: ""}"
         }
+        updateTwitchQualityBtn()
     }
 
     private fun updatePlaybackPos(position: Int) {
@@ -1926,6 +2083,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (!activityIsForeground) return
         when (property) {
             "speed" -> updateSpeedButton()
+            "vid" -> updateTwitchQualityBtn()
         }
         if (metaUpdated)
             updateMetadataDisplay()

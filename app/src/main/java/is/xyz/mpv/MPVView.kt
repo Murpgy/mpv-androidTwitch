@@ -195,6 +195,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
             Property("shuffle", MPV_FORMAT_FLAG),
             Property("hwdec-current"),
             Property("mute", MPV_FORMAT_FLAG),
+            Property("vid", MPV_FORMAT_STRING),
             Property("current-tracks/audio/selected")
         )
 

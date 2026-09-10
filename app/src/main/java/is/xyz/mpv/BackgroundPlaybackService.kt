@@ -127,7 +127,9 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
         cachedMetadata.readAll()
         paused = MPVLib.getPropertyBoolean("pause") == true
         shouldShowPrevNext = (MPVLib.getPropertyInt("playlist-count") ?: 0) > 1
-        thumbnailHandler.postDelayed(thumbnailRunnable, THUMB_DELAY)
+        // Battery saver: don't grab thumbnail when audio-only (vid=no) - saves CPU/GPU
+        val isAudioOnly = MPVLib.getPropertyString("vid") == "no" || MPVLib.getPropertyString("video-format").isNullOrEmpty()
+        if (!isAudioOnly) thumbnailHandler.postDelayed(thumbnailRunnable, THUMB_DELAY)
 
         // create notification and turn this into a "foreground service"
 

@@ -81,6 +81,14 @@
     </TableRow>
 
     <Button
+        android:id="@+id/twitchQualityBtn"
+        style="@style/Widget.AppCompat.Button.Borderless"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Twitch Quality \u00b7 Audio only"
+        android:textAllCaps="false" />
+
+    <Button
         android:id="@+id/advancedBtn"
         style="@style/Widget.AppCompat.Button.Borderless"
         android:layout_width="match_parent"
