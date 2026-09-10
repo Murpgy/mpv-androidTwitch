@@ -76,7 +76,41 @@ jobs:
           CACHE_MODE: "folder"
           CACHE_FOLDER: "${{ github.workspace }}/gh-cache"
 
-      - name: Show release outputs
+      - name: Sign release APKs (always produce installable)
+        env:
+          ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+          ANDROID_SIGNING_ALIAS: ${{ secrets.ANDROID_SIGNING_ALIAS }}
+        run: |
+          # mpv-android.sh only signs release when ANDROID_SIGNING_KEY is set at build time.
+          # Without a secret, Gradle produces *-unsigned.apk which Android 15 rejects
+          # (INSTALL_PARSE_FAILED_NO_CERTIFICATES -> "package appears to be invalid").
+          # Fix: always sign - use real key if provided, else generate ephemeral CI key and sign.
+          set -e
+          BT_VER=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          APS="$ANDROID_HOME/build-tools/$BT_VER/apksigner"
+          if [ -n "$ANDROID_SIGNING_KEY" ] && [ -f "$ANDROID_SIGNING_KEY" ]; then
+            echo "Signing with provided ANDROID_SIGNING_KEY..."
+            for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
+              [ -f "$f" ] || continue
+              out="${f/-unsigned/-signed}"; "$APS" sign --ks "$ANDROID_SIGNING_KEY" --in "$f" --out "$out" && echo "signed $out"
+            done
+          elif ls app/build/outputs/apk/default/release/*-unsigned.apk 1>/dev/null 2>&1; then
+            echo "No signing key - generating ephemeral CI keystore and signing unsigned APKs..."
+            keytool -genkeypair -keystore /tmp/ci.jks -storepass ci -keypass ci -alias ci -dname "CN=CI, OU=CI, O=CI" -validity 10000 -keyalg RSA -keysize 2048 -sigalg SHA256withRSA >/dev/null 2>&1
+            for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
+              [ -f "$f" ] || continue
+              out="${f/-unsigned/-signed}"; "$APS" sign --ks /tmp/ci.jks --ks-pass pass:ci --ks-key-alias ci --key-pass pass:ci --in "$f" --out "$out" && echo "signed $out (ephemeral)"
+              # replace unsigned with signed for artifact upload clarity
+              rm -f "$f"
+            done
+            # Also ensure bundle if built gets at least debug signed (optional)
+          else
+            echo "No unsigned APKs to sign (already signed)"
+          fi
+          # verify
+          for f in app/build/outputs/apk/default/release/*.apk app/build/outputs/apk/allstorage/release/*.apk; do [ -f "$f" ] && "$APS" verify --verbose "$f" 2>&1 | head -n 5 || true; done
+
+      - name: Show release outputs (after signing)
         run: |
           echo "=== default/release ==="; ls -lh app/build/outputs/apk/default/release/* 2>&1 || true
           echo "=== allstorage/release ==="; ls -lh app/build/outputs/apk/allstorage/release/* 2>&1 || true
@@ -84,7 +118,7 @@ jobs:
           echo "=== allstorage/debug ==="; ls -lh app/build/outputs/apk/allstorage/debug/* 2>&1 || true
           echo "=== bundles ==="; ls -lh app/build/outputs/bundle/*/* 2>&1 || true
 
-      # Upload production artifacts (release unsigned/signed)
+      # Upload production artifacts (now signed and installable)
       - name: Upload release APKs (default)
         uses: actions/upload-artifact@v7
         with:
@@ -128,31 +162,6 @@ jobs:
           path: |
             app/build/outputs/apk/allstorage/debug/*.apk
           if-no-files-found: warn
-
-      # Optionally sign if secret provided (replicates mpv-android.sh signing)
-      - name: Sign release APKs (if ANDROID_SIGNING_KEY available)
-        env:
-          ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
-          ANDROID_SIGNING_ALIAS: ${{ secrets.ANDROID_SIGNING_ALIAS }}
-        run: |
-          if [ -z "$ANDROID_SIGNING_KEY" ]; then
-            echo "No ANDROID_SIGNING_KEY secret set - skipping extra signing"
-            exit 0
-          fi
-          # signing is already attempted inside mpv-android.sh if ANDROID_SIGNING_KEY is set at build time
-          # this step re-signs unsigned apks if build was without key at first
-          if ls app/build/outputs/apk/default/release/*-unsigned.apk 1>/dev/null 2>&1; then
-            echo "Signing unsigned release APKs..."
-            BT_VER=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
-            apksigner="$ANDROID_HOME/build-tools/$BT_VER/apksigner"
-            for f in app/build/outputs/apk/default/release/*-unsigned.apk app/build/outputs/apk/allstorage/release/*-unsigned.apk; do
-              [ -f "$f" ] || continue
-              out="${f/-unsigned/-signed}"
-              "$apksigner" sign --ks "$ANDROID_SIGNING_KEY" --in "$f" --out "$out" || echo "sign failed for $f"
-            done
-          else
-            echo "No unsigned APKs to sign (already signed or no release)"
-          fi
 
       - name: Generate checksums
         run: |
