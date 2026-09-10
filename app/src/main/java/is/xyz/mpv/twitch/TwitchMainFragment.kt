@@ -318,7 +318,8 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                         val variants = TwitchService.fetchVariants(master)
                         val chosen = TwitchService.findBestVariant(variants, effectiveQuality) ?: variants.firstOrNull()
                         val targetUrl = chosen?.url ?: master
-                        val isAudioChosen = chosen?.isAudioOnly == true
+                        // If user requested audio_only but variant missing, still force vid=no for battery (muxed audio)
+                        val isAudioChosen = isAudioEff || chosen?.isAudioOnly == true
                         if (dlg.isShowing) dlg.dismiss()
                         launchPlayer(channel, targetUrl, master, isAudioOnly = isAudioChosen)
                     } catch (e: Exception) {

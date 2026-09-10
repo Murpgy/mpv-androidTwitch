@@ -288,82 +288,80 @@ object TwitchService {
     }
 
     internal fun parseMasterPlaylist(text: String, baseUrl: String): List<Variant> {
+        // Mimic player.js РазобратьСписок - correctly map VIDEO GROUP-ID -> NAME via EXT-X-MEDIA TYPE=VIDEO
+        val renditionGroups = mutableMapOf<String, String>() // GROUP-ID -> NAME
         val variants = mutableListOf<Variant>()
         val lines = text.lines()
-        var pendingInfo: String? = null
+        var pendingStreamInf: String? = null
         for (raw in lines) {
             val line = raw.trim()
-            if (line.isEmpty() || line.startsWith("#EXTM3U") || line.startsWith("#EXT-X-TWITCH")) {
-                // Twitch adds #EXT-X-TWITCH-PREFETCH etc - ignore
-                if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA")) {
-                    pendingInfo = line
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXT-X-MEDIA:")) {
+                // Example: #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="720p60",NAME="720p60",AUTOSELECT=YES,DEFAULT=YES
+                // Also audio_only: TYPE=VIDEO,GROUP-ID="audio_only",NAME="Audio Only"
+                val attrs = parseAttributes(line.substringAfter(":"))
+                val type = attrs["TYPE"]
+                if (type == "VIDEO") {
+                    val gid = attrs["GROUP-ID"]
+                    val name = attrs["NAME"]
+                    if (gid != null && name != null) renditionGroups[gid] = name
+                    // If this MEDIA has URI (some Twitch audio_only via MEDIA URI), synthesize variant
+                    val uri = attrs["URI"]
+                    if (uri != null && gid == "audio_only" && variants.none { it.isAudioOnly }) {
+                        val abs = resolveUrl(uri, baseUrl)
+                        variants.add(Variant("audio_only", "Audio Only", abs, isAudioOnly = true, groupId = gid))
+                    }
                 }
                 continue
             }
             if (line.startsWith("#EXT-X-STREAM-INF:")) {
-                pendingInfo = line
+                pendingStreamInf = line
                 continue
             }
-            if (line.startsWith("#EXT-X-MEDIA:")) {
-                // audio_only is declared as MEDIA GROUP-ID="audio_only"
-                // We'll synthesize a variant entry for it
-                if (line.contains("GROUP-ID=\"audio_only\"") || line.contains("NAME=\"Audio Only\"")) {
-                    // URL may be on next line? Actually Twitch uses separate URI in MEDIA tag
-                    val uriMatch = Regex("URI=\"([^\"]+)\"").find(line)
-                    val nameMatch = Regex("NAME=\"([^\"]+)\"").find(line)
-                    val uri = uriMatch?.groupValues?.get(1)
-                    val name = nameMatch?.groupValues?.get(1) ?: "audio_only"
-                    if (uri != null) {
-                        val abs = resolveUrl(uri, baseUrl)
-                        // avoid duplicates
-                        if (variants.none { it.isAudioOnly }) {
-                            variants.add(Variant("audio_only", "Audio Only", abs, isAudioOnly = true))
-                        }
-                    }
-                }
-                continue
-            }
-            if (pendingInfo != null && !line.startsWith("#")) {
-                // line is URL for previous STREAM-INF
-                val info = pendingInfo
-                pendingInfo = null
+            if (pendingStreamInf != null && !line.startsWith("#")) {
+                val info = pendingStreamInf!!
+                pendingStreamInf = null
                 val url = resolveUrl(line, baseUrl)
-                // parse info attributes
-                val bandwidth = Regex("BANDWIDTH=(\\d+)").find(info)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-                val res = Regex("RESOLUTION=(\\d+)x(\\d+)").find(info)
-                val w = res?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                val h = res?.groupValues?.get(2)?.toIntOrNull() ?: 0
-                val nameAttr = Regex("NAME=\"([^\"]+)\"").find(info)?.groupValues?.get(1)
-                val videoAttr = Regex("VIDEO=\"([^\"]+)\"").find(info)?.groupValues?.get(1) ?: ""
-                // also check CODECS etc but not needed
-                // Derive display name like extension's variant logic
-                val fpsHint = if (nameAttr?.contains("60") == true) 60.0 else 30.0
+                val attrs = parseAttributes(info.substringAfter(":"))
+                val bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0L
+                val videoId = attrs["VIDEO"] ?: ""
+                val res = attrs["RESOLUTION"]
+                val fpsAttr = attrs["FRAME-RATE"]
+                var w = 0; var h = 0
+                if (res != null) {
+                    val m = Regex("(\\d+)x(\\d+)").find(res)
+                    w = m?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    h = m?.groupValues?.get(2)?.toIntOrNull() ?: 0
+                }
+                val fps = fpsAttr?.toDoubleOrNull() ?: 0.0
+                // Resolve name via renditionGroups, fallback to id
+                val nameFromGroup = if (videoId.isNotEmpty()) renditionGroups[videoId] else null
                 val id = when {
-                    videoAttr == "chunked" || nameAttr == "chunked" -> "chunked"
-                    nameAttr != null -> nameAttr
-                    h != 0 -> "${h}p${if(fpsHint==60.0) "60" else ""}"
+                    videoId.isNotEmpty() -> videoId
+                    nameFromGroup != null -> nameFromGroup
+                    h != 0 -> "${h}p${if (fps == 60.0) "60" else if ((nameFromGroup ?: "").contains("60")) "60" else ""}"
                     else -> "variant_${variants.size}"
                 }
-                val display = nameAttr ?: if (h!=0) "${h}p${if(fpsHint==60.0) "60" else ""}" else id
-                val isAudio = id == "audio_only" || display.lowercase().contains("audio")
-                variants.add(Variant(id, display, url, bandwidth, w, h, fpsHint, isAudio, videoAttr))
-            } else if (!line.startsWith("#") && line.isNotEmpty()) {
-                // orphan URL without STREAM-INF - could be audio_only fallback URI
-                // ignore unless looks like audio
-                if (line.contains("audio_only")) {
-                    val url = resolveUrl(line, baseUrl)
-                    if (variants.none { it.isAudioOnly }) {
-                        variants.add(Variant("audio_only", "Audio Only", url, isAudioOnly = true))
-                    }
+                val display = nameFromGroup ?: id
+                // audio_only detection: GROUP-ID audio_only or name contains Audio
+                val isAudio = id == "audio_only" || display.equals("Audio Only", ignoreCase = true) || display.lowercase().contains("audio")
+                val fpsHint = when {
+                    fps != 0.0 -> fps
+                    display.contains("60") -> 60.0
+                    else -> 30.0
                 }
+                variants.add(Variant(id, display, url, bandwidth, w, h, fpsHint, isAudio, videoId))
+                continue
+            }
+            // ignore other tags: #EXTM3U, #EXT-X-VERSION, #EXT-X-TWITCH-INFO etc
+            if (line.startsWith("#")) continue
+            // orphan URL without STREAM-INF - could be audio_only fallback
+            if (line.contains("audio_only") && variants.none { it.isAudioOnly }) {
+                val url = resolveUrl(line, baseUrl)
+                variants.add(Variant("audio_only", "Audio Only", url, isAudioOnly = true))
             }
         }
-        // If audio_only not in variants but master URL contains it, add synthetic
-        if (variants.none { it.isAudioOnly }) {
-            // Twitch often provides audio_only via separate rendition - but we can synthesize
-            // Try to infer audio_only URL by replacing variant name in base master? simpler: keep missing
-        }
-        // Sort like player.js:5683 sort - chunked first, audio_only last, rest by bitrate desc
+        // Sort like player.js: chunked first, audio_only last, rest by bitrate desc
         return variants.sortedWith(compareBy<Variant> {
             when (it.id) {
                 "chunked" -> -1
@@ -371,6 +369,18 @@ object TwitchService {
                 else -> 0
             }
         }.thenByDescending { it.bandwidth })
+    }
+
+    private fun parseAttributes(src: String): Map<String, String> {
+        val out = mutableMapOf<String, String>()
+        // Match KEY="quoted" or KEY=value (no quotes) - attribute values may contain commas inside quotes already handled by regex
+        val re = Regex("""([A-Z0-9\-]+)=(?:"([^"]*)"|([^,]*))""")
+        for (m in re.findAll(src)) {
+            val k = m.groupValues[1]
+            val v = if (m.groupValues[2].isNotEmpty() || src.contains("$k=\"")) m.groupValues[2] else m.groupValues[3]
+            out[k] = v
+        }
+        return out
     }
 
     /**

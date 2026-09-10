@@ -385,7 +385,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             // Same practical effect as original ОбновлениеСписковСРекламой/БезРекламы but via mpv loadfile
             try {
                 val prefs = getDefaultSharedPreferences(this)
-                val prefQuality = prefs.getString("twitch_last_quality_$ch", "chunked") ?: "chunked"
+                // Parity with TwitchMainFragment: per-channel > global > chunked, and audio_only via intent
+                val globalQuality = prefs.getString("twitch_default_quality", "chunked") ?: "chunked"
+                val perChannel = prefs.getString("twitch_quality_$ch", globalQuality) ?: globalQuality
+                val prefQuality = if (isAudioOnly) "audio_only" else perChannel
                 // Pre-warm noAd master (picture-by-picture) lazily - use applicationContext to avoid leak (C4)
                 lifecycleScope.launch {
                     if (isFinishing || isDestroyed) return@launch
@@ -398,7 +401,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                             try {
                                 // keep selection for next switch
                                 twitchCurrentVariantUrl = newUrl
-                                if (isAudio) MPVLib.setPropertyString("vid", "no") else if (MPVLib.getPropertyString("vid") == "no") MPVLib.setPropertyString("vid", "auto")
+                                // Keep audio_only intent even if variant fallback is video (muxed audio)
+                                val keepAudio = isAudio || prefQuality == "audio_only" || isAudioOnly
+                                if (keepAudio) MPVLib.setPropertyString("vid", "no") else if (MPVLib.getPropertyString("vid") == "no") MPVLib.setPropertyString("vid", "auto")
                                 MPVLib.command(arrayOf("loadfile", newUrl, "replace"))
                                 showToast(if (reason == "ad_start") "Skipping ad (battery saver)" else "Ad ended - resuming", true)
                             } catch (e: Exception) { Log.w(TAG, "ad switch failed", e) }
