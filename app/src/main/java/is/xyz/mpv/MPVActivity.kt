@@ -328,6 +328,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 // will be picked up via media-title; also force
                 onloadCommands.add(arrayOf("set", "file-local-options/force-media-title", t))
             }
+            // keep-open prevents instant finish on HLS error so we can show toast with reason
+            onloadCommands.add(arrayOf("set", "file-local-options/keep-open", "yes"))
             // power optimization: audio-only -> disable video early
             if (isAudioOnly) {
                 onloadCommands.add(arrayOf("set", "file-local-options/vid", "no"))
@@ -339,6 +341,16 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         player.addObserver(this)
         player.initialize(filesDir.path, cacheDir.path)
+        // Twitch: set browser-like headers for usher/video-weaver (prevents 403)
+        if (twitchChannel != null) {
+            try {
+                MPVLib.setOptionString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
+                MPVLib.setOptionString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                // enable verbose mpv logs for Twitch debugging (visible via adb logcat mpv:V)
+                MPVLib.setOptionString("msg-level", "all=v")
+                Log.v(TAG, "Twitch headers set for $twitchChannel master=$twitchMasterUrl")
+            } catch (_: Exception) {}
+        }
         player.playFile(filepath)
 
         mediaSession = initMediaSession()
@@ -2164,6 +2176,15 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (eventId == MpvEvent.MPV_EVENT_END_FILE) {
             psc.eof()
             updateMediaSession()
+            // Twitch: if file fails before start, keep activity and show reason instead of instant return
+            if (twitchChannel != null && !playbackHasStarted) {
+                val fmt = MPVLib.getPropertyString("file-format") ?: "unknown"
+                Log.w(TAG, "Twitch END_FILE before start fmt=$fmt channel=$twitchChannel url=$twitchCurrentVariantUrl")
+                eventUiHandler.post {
+                    // keep-open=yes keeps player alive, show hint
+                    showToast("Twitch failed to start $twitchChannel (offline/token?). Try audio-only or test URL", true)
+                }
+            }
         }
 
         if (eventId == MpvEvent.MPV_EVENT_SHUTDOWN)

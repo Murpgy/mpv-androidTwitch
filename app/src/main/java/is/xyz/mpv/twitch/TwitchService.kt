@@ -221,6 +221,11 @@ object TwitchService {
     /** Fetch and parse master m3u8 for quality list - for live switching UI */
     suspend fun fetchVariants(masterUrl: String): List<Variant> = withContext(Dispatchers.IO) {
         val text = httpGet(masterUrl, 10000)
+        // Offline / token rejected returns JSON or HTML, not m3u8
+        if (!text.contains("#EXTM3U")) {
+            Log.w(TAG, "master not m3u8: ${text.take(800)}")
+            throw RuntimeException("Channel offline or token rejected: ${text.take(300)}")
+        }
         parseMasterPlaylist(text, masterUrl)
     }
 
