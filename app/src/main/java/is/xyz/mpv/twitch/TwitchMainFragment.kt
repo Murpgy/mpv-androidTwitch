@@ -82,7 +82,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             val currentAudio = prefs.getBoolean("twitch_audio_only", false)
             binding.audioOnlySwitch.setOnCheckedChangeListener(null)
             binding.audioOnlySwitch.isChecked = currentAudio
-            val listener = { checked: Boolean ->
+            val listener: (Boolean) -> Unit = { checked ->
                 prefs.edit().apply {
                     putBoolean("twitch_audio_only", checked)
                     if (checked) putString("twitch_default_quality", "audio_only")
