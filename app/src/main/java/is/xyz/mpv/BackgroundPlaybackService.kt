@@ -186,6 +186,9 @@ class BackgroundPlaybackService : Service(), MPVLib.EventObserver {
         if (eventId == MpvEvent.MPV_EVENT_SHUTDOWN) {
             stopSelf()
         } else if (eventId == MpvEvent.MPV_EVENT_VIDEO_RECONFIG) {
+            // skip thumbnail when audio-only to save battery
+            if (MPVLib.getPropertyString("vid") == "no") return
+            if (MPVLib.getPropertyString("video-format").isNullOrEmpty()) return
             thumbnailHandler.removeCallbacks(thumbnailRunnable)
             thumbnailHandler.postDelayed(thumbnailRunnable, THUMB_DELAY)
         }

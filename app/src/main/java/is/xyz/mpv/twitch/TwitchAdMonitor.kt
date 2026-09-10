@@ -1,12 +1,14 @@
 package `is`.xyz.mpv.twitch
 
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.random.Random
 
 /**
  * Performant parity for twitch_5-2026.6.21 dual-list ad handling.
@@ -31,14 +33,17 @@ class TwitchAdMonitor(
     private var job: Job? = null
     private var isInAdMode = false
     @Volatile private var stopped = false
+    private var lastSiteVariantsFetchMs = 0L
+    private var consecutiveFails = 0
 
+    @Synchronized
     fun start(initialMasterUrl: String, initialNoAdMasterUrl: String?) {
         if (job?.isActive == true) return
         stopped = false
-        job = scope.launch {
+        // Run polling on IO dispatcher, only onSwitch on Main
+        job = scope.launch(Dispatchers.IO) {
             var siteMaster = initialMasterUrl
             var noAdMaster: String? = initialNoAdMasterUrl
-            // Lazy fetch noAd master only when needed, but pre-warm if possible
             var lastSiteVariants: List<TwitchService.Variant>? = null
             var lastNoAdVariants: List<TwitchService.Variant>? = null
 
@@ -52,24 +57,28 @@ class TwitchAdMonitor(
                         siteMaster // keep old, retry next loop
                     }
 
-                    // Resolve preferred variant for site
-                    if (lastSiteVariants == null || shouldRefreshVariants()) {
-                        lastSiteVariants = try { TwitchService.fetchVariants(siteMaster) } catch (e: Exception) {
+                    // Resolve preferred variant for site - refresh every 60s or on failure
+                    if (lastSiteVariants == null || shouldRefreshVariants() || System.currentTimeMillis() - lastSiteVariantsFetchMs > 60_000) {
+                        lastSiteVariants = try {
+                            TwitchService.fetchVariants(siteMaster).also { lastSiteVariantsFetchMs = System.currentTimeMillis(); consecutiveFails = 0 }
+                        } catch (e: Exception) {
                             Log.w(TAG, "site variants fetch failed", e)
-                            // offline or token rejected -> exponential backoff
-                            delay(4000)
+                            consecutiveFails++
+                            delay((2000L * (1 shl consecutiveFails.coerceAtMost(4)) + Random.nextLong(500)).coerceAtMost(16000))
                             continue
                         }
                     }
                     val siteVariant = selectVariant(lastSiteVariants!!, preferredQualityId)
                         ?: lastSiteVariants!!.firstOrNull { !it.isAudioOnly } ?: lastSiteVariants!!.first()
 
-                    // Fetch media playlist for this variant to detect ad
+                    // Fetch media playlist for this variant to detect ad - on IO
                     val siteMediaText = try { httpGetQuick(siteVariant.url) } catch (e: Exception) {
                         Log.w(TAG, "site media fetch failed", e)
-                        delay(2000)
+                        consecutiveFails++
+                        delay((2000L * (1 shl consecutiveFails.coerceAtMost(4)) + Random.nextLong(300)).coerceAtMost(12000))
                         continue
                     }
+                    consecutiveFails = 0
                     val siteHasAd = isAdInMedia(siteMediaText)
                     val siteEnded = siteMediaText.contains("#EXT-X-ENDLIST")
 
@@ -105,7 +114,7 @@ class TwitchAdMonitor(
                             continue
                         }
                         isInAdMode = true
-                        onSwitch(noAdVariant.url, "ad_start", noAdVariant.isAudioOnly)
+                        withContext(Dispatchers.Main) { onSwitch(noAdVariant.url, "ad_start", noAdVariant.isAudioOnly) }
                         // ad pods are 30-180s, poll faster while in ad
                         delay(2000)
                         continue
@@ -113,7 +122,7 @@ class TwitchAdMonitor(
                         // Ad ended -> switch back to site
                         Log.i(TAG, "ad ended, switching back to site")
                         // refresh site variants (may have new session)
-                        lastSiteVariants = try { TwitchService.fetchVariants(siteMaster) } catch (e: Exception) {
+                        lastSiteVariants = try { TwitchService.fetchVariants(siteMaster).also { lastSiteVariantsFetchMs = System.currentTimeMillis() } } catch (e: Exception) {
                             Log.w(TAG, "site variants re-fetch failed", e)
                             delay(2000)
                             continue
@@ -121,14 +130,19 @@ class TwitchAdMonitor(
                         val backVariant = selectVariant(lastSiteVariants!!, preferredQualityId)
                             ?: lastSiteVariants!!.first()
                         isInAdMode = false
-                        onSwitch(backVariant.url, "ad_end", backVariant.isAudioOnly)
+                        withContext(Dispatchers.Main) { onSwitch(backVariant.url, "ad_end", backVariant.isAudioOnly) }
                         delay(1500)
                         continue
                     }
 
-                    // Normal live, poll interval based on targetDuration ~2s, ad mode faster
-                    val interval = if (isInAdMode) 2000L else extractTargetDuration(siteMediaText) * 1000L / 2
-                    delay(interval.coerceIn(1500, 4000))
+                    // Normal live, poll interval based on targetDuration - increased to save battery, respect power saver
+                    val pm = context.getSystemService(PowerManager::class.java)
+                    val isPowerSave = pm?.isPowerSaveMode == true
+                    val baseInterval = if (isInAdMode) 2000L else (extractTargetDuration(siteMediaText) * 1000L * 3 / 4)
+                    var interval = baseInterval.coerceIn(3000, 8000)
+                    if (isPowerSave) interval = (interval * 1.5).toLong().coerceAtMost(12000)
+                    interval += Random.nextLong(400) // jitter
+                    delay(interval)
 
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) {
@@ -144,12 +158,13 @@ class TwitchAdMonitor(
         job?.cancel()
         job = null
         isInAdMode = false
+        lastSiteVariantsFetchMs = 0
     }
 
+    fun isRunning(): Boolean = job?.isActive == true
+
     private fun shouldRefreshVariants(): Boolean {
-        // Simple: refresh every loop for live, but we cache last Variants for 30s to save fetch
-        // For now always re-fetch master every 60s via getHlsMasterUrl TTL handles token
-        return false
+        return System.currentTimeMillis() - lastSiteVariantsFetchMs > 60_000
     }
 
     private fun selectVariant(variants: List<TwitchService.Variant>, prefId: String): TwitchService.Variant? {
@@ -157,48 +172,52 @@ class TwitchAdMonitor(
         return TwitchService.findBestVariant(variants, prefId)
     }
 
-    // Lightweight GET for media playlist (small, ~2KB)
-    private fun httpGetQuick(urlStr: String): String {
+    // Lightweight GET for media playlist (small, ~2KB) - must run on IO
+    private suspend fun httpGetQuick(urlStr: String): String = withContext(Dispatchers.IO) {
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "GET"
-            conn.connectTimeout = 4000
-            conn.readTimeout = 4000
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
             conn.setRequestProperty("Accept", "application/vnd.apple.mpegurl,*/*")
+            conn.setRequestProperty("Connection", "keep-alive")
             conn.setRequestProperty("Referer", "https://www.twitch.tv/")
             conn.setRequestProperty("Origin", "https://www.twitch.tv")
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36")
             val code = conn.responseCode
-            if (code !in 200..299) throw RuntimeException("HTTP $code for $urlStr")
-            return BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).readText()
+            if (code !in 200..299) {
+                val err = conn.errorStream?.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() } ?: ""
+                throw RuntimeException("HTTP $code for $urlStr: $err")
+            }
+            return@withContext conn.inputStream.use { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).readText() }
         } finally { conn.disconnect() }
     }
 
-    /** Ad detection parity: check DATERANGE stitched-ad OR last segment != live */
+    /** Ad detection parity: check DATERANGE stitched-ad OR last segment != live - avoid 3x lines() alloc */
     internal fun isAdInMedia(text: String): Boolean {
         if (text.isEmpty()) return false
-        // Original: РазобратьСписок checks #EXT-X-DATERANGE CLASS="twitch-stitched-ad"
         if (text.contains("twitch-stitched-ad")) return true
         if (text.contains("X-TV-TWITCH-AD-")) return true
-        // Fallback: check last #EXTINF segment name != live
-        // Original: этоРекламныйСегмент(sName) => sName != "" && sName != "live"
-        // Extract last EXTINF line
-        val lastInf = text.lines().filter { it.startsWith("#EXTINF") }.lastOrNull() ?: return false
-        val name = lastInf.substringAfter(",", "").trim()
-        // name is segment name like "live" or ad id; if not live and not empty => ad
-        // Also check if last segment URL contains ad token
-        val lastUrl = text.lines().lastOrNull { it.isNotBlank() && !it.startsWith("#") } ?: ""
+        var lastInf: String? = null
+        var lastUrl = ""
+        text.lineSequence().forEach { line ->
+            if (line.startsWith("#EXTINF")) lastInf = line
+            else if (line.isNotBlank() && !line.startsWith("#")) lastUrl = line
+        }
         if (lastUrl.contains("stitched") || lastUrl.contains("/ad/")) return true
+        if (lastInf == null) return false
+        val name = lastInf!!.substringAfter(",", "").trim()
         return name.isNotEmpty() && name != "live"
     }
 
     private fun extractTargetDuration(text: String): Long {
-        val m = Regex("#EXT-X-TARGETDURATION:(\\d+)").find(text) ?: return 2
+        val m = TARGET_DURATION_REGEX.find(text) ?: return 2
         return try { m.groupValues[1].toLong() } catch (_: Exception) { 2 }
     }
 
     companion object {
         private const val TAG = "TwitchAdMonitor"
+        private val TARGET_DURATION_REGEX = Regex("#EXT-X-TARGETDURATION:(\\d+)")
     }
 }

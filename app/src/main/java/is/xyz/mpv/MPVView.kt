@@ -97,14 +97,17 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
         MPVLib.setOptionString("gpu-context", "android")
         MPVLib.setOptionString("opengl-es", "yes")
         MPVLib.setOptionString("hwdec", hwdec)
-        MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+        // Twitch is h264 only - limit codecs to avoid wasted probe and SW fallback
+        MPVLib.setOptionString("hwdec-codecs", "h264,hevc")
         MPVLib.setOptionString("ao", "audiotrack,opensles")
         MPVLib.setOptionString("audio-set-media-role", "yes")
         MPVLib.setOptionString("tls-verify", "yes")
         MPVLib.setOptionString("tls-ca-file", "${this.context.filesDir.path}/cacert.pem")
         MPVLib.setOptionString("input-default-bindings", "yes")
-        // Limit demuxer cache since the defaults are too high for mobile devices
-        val cacheMegs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32
+        // Limit demuxer cache - smaller for audio-only battery saver
+        val isAudioOnly = try { PreferenceManager.getDefaultSharedPreferences(context).getBoolean("twitch_audio_only", false) } catch (_: Exception) { false }
+        val baseCache = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32
+        val cacheMegs = if (isAudioOnly) 16 else baseCache
         MPVLib.setOptionString("demuxer-max-bytes", "${cacheMegs * 1024 * 1024}")
         MPVLib.setOptionString("demuxer-max-back-bytes", "${cacheMegs * 1024 * 1024}")
         //
@@ -222,7 +225,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
             // pseudo-track to allow disabling audio/subs
             list.add(Track(-1, context.getString(R.string.track_off)))
         }
-        val count = MPVLib.getPropertyInt("track-list/count")!!
+        val count = MPVLib.getPropertyInt("track-list/count") ?: return
         // Note that because events are async, properties might disappear at any moment
         // so use ?: continue instead of !!
         for (i in 0 until count) {
@@ -252,7 +255,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
 
     fun loadPlaylist(): MutableList<PlaylistItem> {
         val playlist = mutableListOf<PlaylistItem>()
-        val count = MPVLib.getPropertyInt("playlist-count")!!
+        val count = MPVLib.getPropertyInt("playlist-count") ?: return playlist
         for (i in 0 until count) {
             val filename = MPVLib.getPropertyString("playlist/$i/filename")!!
             val title = MPVLib.getPropertyString("playlist/$i/title")
@@ -265,7 +268,7 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
 
     fun loadChapters(): MutableList<Chapter> {
         val chapters = mutableListOf<Chapter>()
-        val count = MPVLib.getPropertyInt("chapter-list/count")!!
+        val count = MPVLib.getPropertyInt("chapter-list/count") ?: return chapters
         for (i in 0 until count) {
             val title = MPVLib.getPropertyString("chapter-list/$i/title")
             val time = MPVLib.getPropertyDouble("chapter-list/$i/time")!!

@@ -111,16 +111,19 @@ class TwitchQualityDialog(
                 .setCancelable(false)
                 .create()
             loading.show()
-            scope.launch {
+            val job = scope.launch {
                 try {
                     val vars = TwitchService.fetchVariants(masterUrl)
-                    loading.dismiss()
+                    try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
                     if (vars.isEmpty()) onError("No variants")
                     else onReady(vars, masterUrl)
                 } catch (e: Exception) {
-                    loading.dismiss()
+                    try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
                     onError(e.message ?: "fetch failed")
                 }
+            }
+            job.invokeOnCompletion {
+                try { if (loading.isShowing) loading.dismiss() } catch (_: Exception) {}
             }
         }
     }

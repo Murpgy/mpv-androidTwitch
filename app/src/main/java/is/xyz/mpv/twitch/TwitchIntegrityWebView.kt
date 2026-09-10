@@ -52,10 +52,17 @@ object TwitchIntegrityWebView {
             }
         } catch (e: Exception) { Log.w(TAG, "cookie read failed", e) }
 
-        // Fallback: load popout in offscreen WebView (requires main thread)
+        // Fallback: load popout in offscreen WebView (requires main thread) - fixed leak/triple destroy
         return try {
             suspendCancellableCoroutine { cont ->
                 var webView: WebView? = null
+                var destroyed = false
+                fun safeDestroy() { if (!destroyed) { destroyed = true; try { webView?.destroy() } catch (_: Exception) {} } }
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                val timeoutRunnable = Runnable {
+                    if (cont.isActive) cont.resume(null)
+                    safeDestroy()
+                }
                 val runnable = Runnable {
                     try {
                         webView = WebView(context.applicationContext).apply {
@@ -64,6 +71,7 @@ object TwitchIntegrityWebView {
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     view?.postDelayed({
+                                        if (!cont.isActive) { safeDestroy(); return@postDelayed }
                                         try {
                                             val cookies2 = CookieManager.getInstance().getCookie("https://www.twitch.tv") ?: ""
                                             val m2 = Regex("tw5~gqltoken=([^;]+)").find(cookies2)
@@ -76,35 +84,36 @@ object TwitchIntegrityWebView {
                                                     cachedToken = t
                                                     cachedExpiry = exp
                                                     if (cont.isActive) cont.resume(t)
-                                                    webView?.destroy()
+                                                    handler.removeCallbacks(timeoutRunnable)
+                                                    safeDestroy()
                                                     return@postDelayed
                                                 }
                                             }
                                         } catch (_: Exception) {}
                                         if (cont.isActive) cont.resume(null)
-                                        webView?.destroy()
+                                        handler.removeCallbacks(timeoutRunnable)
+                                        safeDestroy()
                                     }, 3000)
                                 }
                             }
                             loadUrl("https://www.twitch.tv/popout/")
                         }
-                        // timeout
-                        webView?.postDelayed({
-                            if (cont.isActive) {
-                                cont.resume(null)
-                                webView?.destroy()
-                            }
-                        }, TIMEOUT_MS)
+                        handler.postDelayed(timeoutRunnable, TIMEOUT_MS)
                     } catch (e: Exception) {
                         Log.w(TAG, "WebView init failed", e)
+                        handler.removeCallbacks(timeoutRunnable)
                         if (cont.isActive) cont.resume(null)
+                        safeDestroy()
                     }
                 }
-                // Ensure run on main thread
                 if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) runnable.run()
-                else android.os.Handler(android.os.Looper.getMainLooper()).post(runnable)
+                else handler.post(runnable)
 
-                cont.invokeOnCancellation { webView?.destroy() }
+                cont.invokeOnCancellation {
+                    handler.removeCallbacks(timeoutRunnable)
+                    handler.removeCallbacksAndMessages(null)
+                    safeDestroy()
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "getIntegrityToken failed", e)

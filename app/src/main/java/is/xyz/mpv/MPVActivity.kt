@@ -345,15 +345,15 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         player.addObserver(this)
         player.initialize(filesDir.path, cacheDir.path)
-        // Twitch: set browser-like headers for usher/video-weaver (prevents 403) - save prev to restore (M5)
+        // Twitch: set browser-like headers for usher/video-weaver (prevents 403) - save prev to restore
+        // must use setPropertyString after init, not setOptionString (option only works pre-init)
         if (twitchChannel != null) {
             try {
                 twitchPrevHeaders = MPVLib.getPropertyString("http-header-fields")
                 twitchPrevUa = MPVLib.getPropertyString("user-agent")
-                MPVLib.setOptionString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
-                MPVLib.setOptionString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                // only verbose in debug, not release (battery/log spam)
-                if (BuildConfig.DEBUG) MPVLib.setOptionString("msg-level", "all=v")
+                MPVLib.setPropertyString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
+                MPVLib.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+                if (BuildConfig.DEBUG) MPVLib.setPropertyString("msg-level", "all=v")
                 Log.v(TAG, "Twitch headers set for $twitchChannel master=$twitchMasterUrl")
             } catch (_: Exception) {}
         }
@@ -471,13 +471,17 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         twitchAdMonitor?.stop()
         twitchAdMonitor = null
 
-        // Restore mpv headers (M5) to avoid privacy leak for next non-Twitch file
+        // Restore mpv headers to avoid privacy leak for next non-Twitch file - use property
         try {
-            if (twitchPrevHeaders != null) MPVLib.setOptionString("http-header-fields", twitchPrevHeaders!!) else MPVLib.setOptionString("http-header-fields", "")
-            if (twitchPrevUa != null) MPVLib.setOptionString("user-agent", twitchPrevUa!!)
+            if (twitchPrevHeaders != null) MPVLib.setPropertyString("http-header-fields", twitchPrevHeaders!!) else MPVLib.setPropertyString("http-header-fields", "")
+            if (twitchPrevUa != null) MPVLib.setPropertyString("user-agent", twitchPrevUa!!)
         } catch (_: Exception) {}
         twitchPrevHeaders = null
         twitchPrevUa = null
+        // clear handlers to avoid leaks
+        eventUiHandler.removeCallbacksAndMessages(null)
+        fadeHandler.removeCallbacksAndMessages(null)
+        stopServiceHandler.removeCallbacksAndMessages(null)
 
         // take the background service with us
         stopServiceRunnable.run()
@@ -570,6 +574,11 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         activityIsForeground = false
         eventUiHandler.removeCallbacksAndMessages(null)
+        // Battery: pause ad monitor when backgrounded - will resume in onResume
+        if (shouldBackground) {
+            twitchAdMonitor?.let { Log.v(TAG, "pausing ad monitor for background"); it.stop() }
+            // keep object but stopped; onResume will restart if needed (don't null to avoid race, start() handles stopped)
+        }
         if (isFinishing) {
             savePosition()
             // tell mpv to shut down so that any other property changes or such are ignored,
@@ -639,7 +648,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 putInt("last_screen_brightness", lastScreenBrightness)
             else
                 remove("last_screen_brightness")
-            commit()
+            apply()
         }
     }
 
@@ -670,11 +679,48 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         readSettings()
 
         activityIsForeground = true
+        // resume ad monitor if was paused for background (was stopped but object still exists)
+        twitchChannel?.let { ch ->
+            if (twitchMasterUrl != null && twitchAdMonitor?.isRunning() != true) {
+                val isAudioOnly = intent.getBooleanExtra("twitch_is_audio_only", false)
+                val prefs = getDefaultSharedPreferences(this)
+                val globalQuality = prefs.getString("twitch_default_quality", "chunked") ?: "chunked"
+                val perChannel = prefs.getString("twitch_quality_$ch", globalQuality) ?: globalQuality
+                val prefQuality = if (isAudioOnly) "audio_only" else perChannel
+                val master = twitchMasterUrl!!
+                // if existing monitor exists but stopped, reuse it; otherwise create new
+                if (twitchAdMonitor != null) {
+                    twitchAdMonitor?.start(master, null)
+                } else {
+                    lifecycleScope.launch {
+                        var noAd: String? = null
+                        try { noAd = TwitchService.getHlsMasterUrl(applicationContext, ch, withoutAds = true) } catch (_: Exception) {}
+                        if (isFinishing || isDestroyed) return@launch
+                        twitchAdMonitor = TwitchAdMonitor(applicationContext, ch, prefQuality, { newUrl, reason, isAudio ->
+                            Log.i(TAG, "AdMonitor switch $reason -> $newUrl")
+                            runOnUiThread {
+                                if (isFinishing || isDestroyed) return@runOnUiThread
+                                try {
+                                    twitchCurrentVariantUrl = newUrl
+                                    val keepAudio = isAudio || prefQuality == "audio_only" || isAudioOnly
+                                    if (keepAudio) MPVLib.setPropertyString("vid", "no") else if (MPVLib.getPropertyString("vid") == "no") MPVLib.setPropertyString("vid", "auto")
+                                    MPVLib.command(arrayOf("loadfile", newUrl, "replace"))
+                                    showToast(if (reason == "ad_start") "Skipping ad (battery saver)" else "Ad ended - resuming", true)
+                                } catch (e: Exception) { Log.w(TAG, "ad switch failed", e) }
+                            }
+                        }, lifecycleScope)
+                        twitchAdMonitor?.start(master, noAd)
+                    }
+                }
+            }
+        }
         // stop background service with a delay
         stopServiceHandler.removeCallbacks(stopServiceRunnable)
         stopServiceHandler.postDelayed(stopServiceRunnable, 1000L)
 
         refreshUi()
+        // refresh screen-on state (vid may have changed)
+        updatePlaybackStatus(psc.pause)
 
         super.onResume()
     }
@@ -1941,11 +1987,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.playBtn.setImageResource(r)
 
         updatePiPParams()
-        if (paused) {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        // Battery: don't keep screen on for audio-only (vid=no or isPlayingAudioOnly)
+        val keepOn = !paused && !isPlayingAudioOnly() && MPVLib.getPropertyString("vid") != "no"
+        if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun updateDecoderButton() {
