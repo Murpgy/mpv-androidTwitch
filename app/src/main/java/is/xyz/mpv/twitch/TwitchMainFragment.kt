@@ -19,10 +19,10 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.TextView
-import is.xyz.mpv.MPVActivity
-import is.xyz.mpv.R
-import is.xyz.mpv.Utils
-import is.xyz.mpv.databinding.FragmentTwitchMainBinding
+import `is`.xyz.mpv.MPVActivity
+import `is`.xyz.mpv.R
+import `is`.xyz.mpv.Utils
+import `is`.xyz.mpv.databinding.FragmentTwitchMainBinding
 import kotlinx.coroutines.launch
 
 /**
@@ -52,7 +52,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
 
         binding.addBtn.setOnClickListener { showAddDialog() }
         binding.settingsBtn.setOnClickListener {
-            startActivity(Intent(context, is.xyz.mpv.preferences.PreferenceActivity::class.java))
+            startActivity(Intent(context, `is`.xyz.mpv.preferences.PreferenceActivity::class.java))
         }
         binding.urlBtn.setOnClickListener {
             val helper = Utils.OpenUrlDialog(requireContext())
@@ -194,7 +194,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun launchPlayer(channel: String, url: String, masterUrl: String, isAudioOnly: Boolean) {
-        val i = Intent(requireContext(), MPVActivity::class.java).apply {
+        val i = Intent(requireContext(), `is`.xyz.mpv.MPVActivity::class.java).apply {
             putExtra("filepath", url)
             putExtra("twitch_channel", channel)
             putExtra("twitch_master_url", masterUrl)
@@ -213,7 +213,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun playUrl(url: String) {
-        val i = Intent(requireContext(), MPVActivity::class.java).apply { putExtra("filepath", url) }
+        val i = Intent(requireContext(), `is`.xyz.mpv.MPVActivity::class.java).apply { putExtra("filepath", url) }
         startActivity(i)
     }
 

@@ -3,7 +3,7 @@ package `is`.xyz.mpv.twitch
 import android.app.AlertDialog
 import android.content.Context
 import android.util.Log
-import is.xyz.mpv.MPVLib
+import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.*
 
 /**
