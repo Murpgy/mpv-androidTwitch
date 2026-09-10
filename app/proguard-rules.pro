@@ -12,3 +12,5 @@
 -keep class androidx.cardview.** { *; }
 -keep class androidx.lifecycle.** { *; }
 -keep class kotlinx.coroutines.** { *; }
+-keep class com.bumptech.glide.** { *; }
+-keep class com.github.bumptech.glide.** { *; }

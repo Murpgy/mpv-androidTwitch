@@ -2,6 +2,7 @@ package `is`.xyz.mpv.twitch
 
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -12,13 +13,19 @@ import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
-import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.TextView
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.DataSource
+import com.bumptech.glide.load.engine.GlideException
+import com.bumptech.glide.request.RequestListener
+import com.bumptech.glide.request.target.Target
 import `is`.xyz.mpv.MPVActivity
 import `is`.xyz.mpv.R
 import `is`.xyz.mpv.Utils
@@ -48,7 +55,9 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                 onLongClick = { channel -> showChannelOptions(channel) }
             )
 
-            binding.recycler.layoutManager = LinearLayoutManager(requireContext())
+            // Grid 2 cols portrait, 3 cols landscape - light battery, CDN thumbs
+            val span = if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 3 else 2
+            binding.recycler.layoutManager = GridLayoutManager(requireContext(), span)
             binding.recycler.adapter = adapter
 
             binding.addBtn.setOnClickListener { showAddDialog() }
@@ -193,10 +202,27 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         val combined = (fav + recent.filterNot { fav.contains(it) }).distinct()
         adapter.submit(combined)
         binding.emptyHint.visibility = if (combined.isEmpty()) View.VISIBLE else View.GONE
-        binding.swipeRefresh.isRefreshing = false
+        binding.swipeRefresh.isRefreshing = combined.isNotEmpty()
         // subtitle
         binding.subtitle.text = if (fav.isEmpty()) "Add streamers to start \u00b7 tap + below"
         else "${fav.size} favorite${if(fav.size!=1) "s" else ""} \u00b7 ${recent.size} recent"
+
+        // Fetch metas via CDN (GQL for icon+online, CDN jpg for thumb) - refresh on resume/swipe
+        if (combined.isNotEmpty()) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                try {
+                    val metas = TwitchService.fetchChannelMetas(requireContext().applicationContext, combined)
+                    if (!isAdded) return@launch
+                    adapter.updateMetas(metas)
+                } catch (e: Exception) {
+                    Log.w("TwitchMain", "metas failed", e)
+                } finally {
+                    if (isAdded) binding.swipeRefresh.isRefreshing = false
+                }
+            }
+        } else {
+            binding.swipeRefresh.isRefreshing = false
+        }
     }
 
     override fun onDestroyView() {
@@ -354,11 +380,17 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         private val onLongClick: (String)->Unit
     ): RecyclerView.Adapter<ChannelAdapter.Holder>() {
         private var items = listOf<String>()
-        fun submit(l: List<String>) { items = l; notifyDataSetChanged() }
+        private var metas: Map<String, TwitchService.ChannelMeta> = emptyMap()
+        fun submit(l: List<String>) { items = l; metas = emptyMap(); notifyDataSetChanged() }
+        fun updateMetas(m: Map<String, TwitchService.ChannelMeta>) { metas = m; notifyDataSetChanged() }
         inner class Holder(v: View): RecyclerView.ViewHolder(v) {
             val name: TextView = v.findViewById(R.id.channelName)
-            val badge: TextView = v.findViewById(R.id.channelBadge)
-            val play: ImageButton = v.findViewById(R.id.playBtn)
+            val thumb: ImageView = v.findViewById(R.id.thumb)
+            val icon: ImageView = v.findViewById(R.id.icon)
+            val liveBadge: TextView = v.findViewById(R.id.liveBadge)
+            val viewersBadge: TextView = v.findViewById(R.id.viewersBadge)
+            val offlineDim: View = v.findViewById(R.id.offlineDim)
+            val play: ImageView = v.findViewById(R.id.playBtn)
         }
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
             val v = LayoutInflater.from(parent.context).inflate(R.layout.item_twitch_channel, parent, false)
@@ -367,10 +399,44 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         override fun getItemCount() = items.size
         override fun onBindViewHolder(h: Holder, pos: Int) {
             val ch = items[pos]
+            val meta = metas[ch]
+            val isOnline = meta?.isOnline == true
             h.name.text = ch
-            val isFav = TwitchService.getFavorites(h.itemView.context).contains(ch)
-            h.badge.text = if (isFav) "\u2605 fav" else "\u25cf recent"
-            h.badge.visibility = View.VISIBLE
+            // LIVE badge + offline dim with shadow already in layout (scrim_bottom)
+            h.liveBadge.visibility = if (isOnline) View.VISIBLE else View.GONE
+            h.offlineDim.visibility = if (meta != null && !isOnline) View.VISIBLE else View.GONE
+            h.thumb.alpha = if (meta != null && !isOnline) 0.55f else 1f
+            h.viewersBadge.visibility = View.GONE // CDN path has no viewers without extra GQL; keep hidden
+            // Icon via Glide (GQL profileImageURL) circular
+            val iconUrl = meta?.iconUrl
+            if (iconUrl != null) {
+                Glide.with(h.icon).load(iconUrl).circleCrop().placeholder(R.drawable.ic_play_arrow_black_24dp).into(h.icon)
+            } else {
+                h.icon.setImageResource(R.drawable.ic_play_arrow_black_24dp)
+            }
+            // Thumb via CDN static-cdn - Glide handles 404 as error -> show offline
+            val previewUrl = meta?.previewUrl ?: TwitchService.previewCdnUrl(ch)
+            if (isOnline) {
+                Glide.with(h.thumb).load(previewUrl)
+                    .placeholder(android.R.color.transparent)
+                    .error(android.R.color.transparent)
+                    .listener(object: RequestListener<Drawable> {
+                        override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirst: Boolean): Boolean {
+                            h.offlineDim.visibility = View.VISIBLE
+                            h.liveBadge.visibility = View.GONE
+                            return false
+                        }
+                        override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, ds: DataSource, isFirst: Boolean) = false
+                    })
+                    .into(h.thumb)
+            } else if (meta == null) {
+                // loading state - light placeholder, will update when metas arrive
+                Glide.with(h.thumb).clear(h.thumb)
+                h.thumb.setBackgroundColor(0xFF1A1A1A.toInt())
+            } else {
+                Glide.with(h.thumb).clear(h.thumb)
+                h.thumb.setBackgroundColor(0xFF1A1A1A.toInt())
+            }
             h.itemView.setOnClickListener { onClick(ch) }
             h.itemView.setOnLongClickListener { onLongClick(ch); true }
             h.play.setOnClickListener { onClick(ch) }

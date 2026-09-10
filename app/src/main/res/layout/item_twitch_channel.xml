@@ -7,43 +7,110 @@
     app:cardCornerRadius="12dp"
     app:cardElevation="2dp">
 
-    <LinearLayout
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="12dp"
-        android:gravity="center_vertical">
+        android:layout_height="wrap_content">
 
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_weight="1"
+        <!-- 16:9 preview - CDN live_user_xxx-320x180.jpg, Glide cached -->
+        <ImageView
+            android:id="@+id/thumb"
+            android:layout_width="match_parent"
+            android:layout_height="110dp"
+            android:scaleType="centerCrop"
+            android:contentDescription="preview"
+            android:background="#1A1A1A" />
+
+        <!-- scrim bottom 36dp for text readability -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_gravity="bottom"
+            android:background="@drawable/scrim_bottom" />
+
+        <!-- LIVE badge top-left, shadow for readability -->
+        <TextView
+            android:id="@+id/liveBadge"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical">
+            android:layout_gravity="top|start"
+            android:layout_margin="6dp"
+            android:background="#CCFF0033"
+            android:padding="3dp"
+            android:text="● LIVE"
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:shadowColor="#99000000"
+            android:shadowDx="0"
+            android:shadowDy="1"
+            android:shadowRadius="2"
+            android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/channelName"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="xqc"
-                android:textSize="18sp"
-                android:textStyle="bold" />
+        <!-- viewers top-right -->
+        <TextView
+            android:id="@+id/viewersBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_margin="6dp"
+            android:background="#66000000"
+            android:padding="3dp"
+            android:text=""
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:shadowColor="#99000000"
+            android:shadowDx="0"
+            android:shadowDy="1"
+            android:shadowRadius="2"
+            android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/channelBadge"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="★ fav"
-                android:textSize="11sp"
-                android:alpha="0.6"/>
-        </LinearLayout>
+        <!-- icon circular overlay bottom-left above scrim -->
+        <ImageView
+            android:id="@+id/icon"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="bottom|start"
+            android:layout_margin="6dp"
+            android:contentDescription="icon" />
 
-        <ImageButton
+        <!-- channel name bottom, shadow -->
+        <TextView
+            android:id="@+id/channelName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:layout_marginStart="40dp"
+            android:layout_marginEnd="6dp"
+            android:layout_marginBottom="6dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="xqc"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:shadowColor="#99000000"
+            android:shadowDx="0"
+            android:shadowDy="1"
+            android:shadowRadius="3" />
+
+        <!-- offline dim overlay + centered icon when offline (shown via alpha) -->
+        <View
+            android:id="@+id/offlineDim"
+            android:layout_width="match_parent"
+            android:layout_height="110dp"
+            android:background="#80000000"
+            android:visibility="gone" />
+
+        <!-- play affordance bottom-right -->
+        <ImageView
             android:id="@+id/playBtn"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="6dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Play"
-            app:srcCompat="@drawable/ic_play_arrow_black_24dp"
-            app:tint="?attr/colorPrimary" />
-    </LinearLayout>
+            android:src="@android:drawable/ic_media_play"
+            android:alpha="0.9" />
+
+    </FrameLayout>
 </androidx.cardview.widget.CardView>

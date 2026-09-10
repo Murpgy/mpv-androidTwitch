@@ -453,4 +453,89 @@ object TwitchService {
         PreferenceManager.getDefaultSharedPreferences(context).edit()
             .putString("twitch_recent", JSONArray(list).toString()).apply()
     }
+
+    // --- Grid metas: CDN best (GQL for icon + online, CDN jpg for thumb) ---
+    data class ChannelMeta(
+        val login: String,
+        val iconUrl: String?,          // GQL profileImageURL(width:150)
+        val isOnline: Boolean,
+        val previewUrl: String         // CDN static-cdn preview 320x180
+    )
+
+    fun previewCdnUrl(login: String): String =
+        "https://static-cdn.jtvnw.net/previews-ttv/live_user_${login.lowercase()}-320x180.jpg"
+
+    suspend fun fetchChannelMetas(context: Context, logins: List<String>): Map<String, ChannelMeta> = withContext(Dispatchers.IO) {
+        if (logins.isEmpty()) return@withContext emptyMap()
+        val clean = logins.map { it.lowercase().trim() }.filter { it.isNotEmpty() }.distinct().take(30)
+        if (clean.isEmpty()) return@withContext emptyMap()
+        val deviceId = try { getDeviceId(context) } catch (_: Exception) { "" }
+        // Build batch GQL array: one op per login
+        val ops = JSONArray()
+        for (login in clean) {
+            val op = JSONObject().apply {
+                put("operationName", "ChannelShell")
+                put("variables", JSONObject().apply { put("login", login) })
+                put("extensions", JSONObject().apply {
+                    put("persistedQuery", JSONObject().apply {
+                        put("version", 1)
+                        // Use same query as web ChannelShell: user(login) { profileImageURL stream{id} }
+                        put("sha256Hash", "a3bb30d0f278be50c004556fb441effd819a76550656f75280ac01d1f5bc65a06")
+                    })
+                })
+            }
+            // Fallback to inline query if persisted fails - we use inline for reliability
+            val inline = JSONObject().apply {
+                put("query", """query(${'$'}login:String!){ user(login:${'$'}login){ login profileImageURL(width:150) stream{ id type } } }""")
+                put("variables", JSONObject().apply { put("login", login) })
+            }
+            ops.put(inline)
+        }
+        val headers = mutableMapOf(
+            "Accept-Language" to "en-US",
+            "Client-ID" to CLIENT_ID,
+            "Content-Type" to "application/json",
+            "X-Device-ID" to deviceId
+        )
+        getOAuthToken(context)?.let { if (it.isNotBlank()) headers["Authorization"] = "OAuth $it" }
+        try {
+            val respText = postJsonArray("https://gql.twitch.tv/gql", ops.toString(), headers, 12000)
+            val arr = JSONArray(respText)
+            val out = mutableMapOf<String, ChannelMeta>()
+            for (i in 0 until arr.length()) {
+                val login = clean.getOrNull(i) ?: continue
+                val obj = arr.optJSONObject(i) ?: continue
+                val data = obj.optJSONObject("data")?.optJSONObject("user")
+                val icon = data?.optString("profileImageURL")?.takeIf { it.isNotBlank() }
+                val stream = data?.optJSONObject("stream")
+                val isOnline = stream != null && !stream.isNull("id")
+                out[login] = ChannelMeta(login, icon, isOnline, previewCdnUrl(login))
+            }
+            // Fill missing (GQL error) as offline with CDN preview still
+            for (login in clean) if (!out.containsKey(login)) out[login] = ChannelMeta(login, null, false, previewCdnUrl(login))
+            return@withContext out
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchChannelMetas failed, fallback offline", e)
+            return@withContext clean.associateWith { ChannelMeta(it, null, false, previewCdnUrl(it)) }
+        }
+    }
+
+    private fun postJsonArray(urlStr: String, body: String, headers: Map<String,String>, timeoutMs: Int): String {
+        val url = URL(urlStr)
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.doOutput = true
+            conn.doInput = true
+            for ((k,v) in headers) conn.setRequestProperty(k, v)
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val resp = BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).readText()
+            if (code !in 200..299) throw RuntimeException("HTTP $code: $resp")
+            return resp
+        } finally { conn.disconnect() }
+    }
 }
