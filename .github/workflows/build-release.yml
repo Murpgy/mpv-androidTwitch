@@ -122,11 +122,14 @@ jobs:
 
       # Optionally sign if secret provided (replicates mpv-android.sh signing)
       - name: Sign release APKs (if ANDROID_SIGNING_KEY available)
-        if: ${{ secrets.ANDROID_SIGNING_KEY != '' }}
         env:
           ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
           ANDROID_SIGNING_ALIAS: ${{ secrets.ANDROID_SIGNING_ALIAS }}
         run: |
+          if [ -z "$ANDROID_SIGNING_KEY" ]; then
+            echo "No ANDROID_SIGNING_KEY secret set - skipping extra signing"
+            exit 0
+          fi
           # signing is already attempted inside mpv-android.sh if ANDROID_SIGNING_KEY is set at build time
           # this step re-signs unsigned apks if build was without key at first
           if ls app/build/outputs/apk/default/release/*-unsigned.apk 1>/dev/null 2>&1; then
