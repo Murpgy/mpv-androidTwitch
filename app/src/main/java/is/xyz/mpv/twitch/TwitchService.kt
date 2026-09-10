@@ -53,21 +53,18 @@ object TwitchService {
     )
 
     // Device ID like player.js:getUniqueDeviceId - persistent per install
+    @Synchronized
     fun getDeviceId(context: Context): String {
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         var id = prefs.getString("twitch_device_id", null)
         if (id.isNullOrEmpty()) {
-            // OLDdtwitch logic: 0000000000000000 + random
-            val random = prefs.getFloat("twitch_random", Random.nextFloat().let { if (it==0f) 0.1f else it })
-            // ensure persistence of random
-            if (!prefs.contains("twitch_random")) {
-                prefs.edit().putFloat("twitch_random", random).apply()
-            }
-            val randSuffix = String.format("%.16f", random).substring(2) // after "0."
-            id = "0000000000000000$randSuffix".take(32).padEnd(32,'0')
-            // fallback to UUID prefix if above weird
-            if (id.length < 16) id = UUID.randomUUID().toString().replace("-","").take(16)
-            prefs.edit().putString("twitch_device_id", id).apply()
+            // Use UUID directly - avoids float bit-loss and async apply race
+            id = UUID.randomUUID().toString().replace("-", "").take(16).padEnd(16, '0')
+            // Keep legacy prefix for compatibility: 0000000000000000 + suffix
+            // Generate 16 random hex chars
+            val hex = UUID.randomUUID().toString().replace("-", "").take(16)
+            id = "0000000000000000$hex".take(32)
+            prefs.edit().putString("twitch_device_id", id).commit()
             Log.v(TAG, "generated device id: $id")
         }
         return id
@@ -79,9 +76,10 @@ object TwitchService {
         return prefs.getString("twitch_oauth_token", null)?.takeIf { it.isNotBlank() }
     }
 
-    // In-memory cache for PlaybackAccessToken URL like player.js:5682
-    private var cachedM3u8Url: String = ""
-    private var cachedExpiryMs: Long = 0
+    // In-memory cache for PlaybackAccessToken URL like player.js:5682 - channel-keyed (C1 fix)
+    private data class CachedUrl(val url: String, val expiry: Long)
+    private val cacheLock = Any()
+    private val cachedM3u8 = mutableMapOf<String, CachedUrl>() // key = channel
     private const val TOKEN_TTL_MS = 15 * 60 * 1000L
 
     /**
@@ -93,9 +91,14 @@ object TwitchService {
         val clean = channel.trim().lowercase()
         require(clean.isNotEmpty()) { "empty channel" }
         // Return cached if valid and not ad-free request (ad path uses different token)
-        if (!withoutAds && cachedM3u8Url.isNotEmpty() && System.currentTimeMillis() < cachedExpiryMs) {
-            // add cache-bust p= param like player.js:5689
-            return@withContext "$cachedM3u8Url&p=${Random.nextInt(0, 9999999)}"
+        if (!withoutAds) {
+            synchronized(cacheLock) {
+                val cached = cachedM3u8[clean]
+                if (cached != null && System.currentTimeMillis() < cached.expiry) {
+                    // add cache-bust p= param like player.js:5689
+                    return@withContext "${cached.url}&p=${Random.nextInt(0, 9999999)}"
+                }
+            }
         }
 
         val deviceId = getDeviceId(context)
@@ -122,15 +125,18 @@ object TwitchService {
             // store playSession for minute-watched tracking (not needed for playback but kept)
             PreferenceManager.getDefaultSharedPreferences(context).edit().putString("twitch_play_session", playSessionId).apply()
             url += "&play_session_id=$playSessionId"
-            cachedM3u8Url = url
-            cachedExpiryMs = System.currentTimeMillis() + TOKEN_TTL_MS
+            synchronized(cacheLock) {
+                cachedM3u8[clean] = CachedUrl(url, System.currentTimeMillis() + TOKEN_TTL_MS)
+            }
         }
-        Log.v(TAG, "usher url for $clean (withoutAds=$withoutAds): $url")
+        // Mask token/sig in logs (N3)
+        val masked = url.replace(Regex("token=[^&]+"), "token=***").replace(Regex("sig=[^&]+"), "sig=***")
+        Log.v(TAG, "usher url for $clean (withoutAds=$withoutAds): $masked")
         // Add random p bust like extension? Only non-ad path uses it on return, not initially
         url
     }
 
-    private fun fetchPlaybackAccessToken(channel: String, deviceId: String, context: Context, withoutAds: Boolean): PlaybackAccessToken {
+    private suspend fun fetchPlaybackAccessToken(channel: String, deviceId: String, context: Context, withoutAds: Boolean): PlaybackAccessToken {
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         val oauth = getOAuthToken(context)
 
@@ -163,19 +169,46 @@ object TwitchService {
         // If Twitch starts rejecting, we fall back to WebView extraction (see TwitchIntegrityWebView).
         // For now try without; extension's gqltoken.js fetches via iframe but same token is optional for PlaybackAccessToken.
 
-        val resp = postJson("https://gql.twitch.tv/gql", body, headers, 15000)
-        val json = JSONObject(resp)
+        // Retry once on service timeout like player.js:5528 (5s + random)
+        var resp = postJson("https://gql.twitch.tv/gql", body, headers, 15000)
+        var json = JSONObject(resp)
+        if (json.has("errors")) {
+            val errs = json.getJSONArray("errors")
+            val isServiceTimeout = (0 until errs.length()).any { errs.getJSONObject(it).optString("message").contains("service timeout") }
+            if (isServiceTimeout) {
+                Log.w(TAG, "GQL service timeout, retrying once")
+                Thread.sleep(5000 + Random.nextLong(2500))
+                resp = postJson("https://gql.twitch.tv/gql", body, headers, 15000)
+                json = JSONObject(resp)
+            }
+        }
         if (json.has("errors")) {
             val errs = json.getJSONArray("errors")
             Log.w(TAG, "GQL errors: $errs")
-            // Check for failed integrity
+            // Check for failed integrity - try WebView fallback (M1)
             for (i in 0 until errs.length()) {
                 val msg = errs.getJSONObject(i).optString("message")
                 if (msg.contains("failed integrity")) {
-                    throw SecurityException("ACCESS_DENIED_INTEGRITY")
+                    Log.w(TAG, "Trying Client-Integrity WebView fallback")
+                    val integrity = try { TwitchIntegrityWebView.getIntegrityToken(context) } catch (_: Exception) { null }
+                    if (!integrity.isNullOrEmpty()) {
+                        headers["Client-Integrity"] = integrity
+                        resp = postJson("https://gql.twitch.tv/gql", body, headers, 15000)
+                        json = JSONObject(resp)
+                        if (json.has("errors")) {
+                            val errs2 = json.getJSONArray("errors")
+                            if ((0 until errs2.length()).any { errs2.getJSONObject(it).optString("message").contains("failed integrity") }) {
+                                throw SecurityException("ACCESS_DENIED_INTEGRITY")
+                            }
+                            throw RuntimeException("GQL error after integrity: $errs2")
+                        }
+                        break // success, continue to parse
+                    } else {
+                        throw SecurityException("ACCESS_DENIED_INTEGRITY")
+                    }
                 }
             }
-            throw RuntimeException("GQL error: $errs")
+            if (json.has("errors")) throw RuntimeException("GQL error: $errs")
         }
         val data = json.optJSONObject("data") ?: throw RuntimeException("No data in GQL response")
         val tokenObj = data.optJSONObject("streamPlaybackAccessToken") ?: throw RuntimeException("No streamPlaybackAccessToken")
@@ -221,10 +254,15 @@ object TwitchService {
     /** Fetch and parse master m3u8 for quality list - for live switching UI */
     suspend fun fetchVariants(masterUrl: String): List<Variant> = withContext(Dispatchers.IO) {
         val text = httpGet(masterUrl, 10000)
+        if (text.contains("shelblock.proxy")) {
+            Log.w(TAG, "shelblock proxy detected")
+            throw RuntimeException("Ad-block proxy detected (shelblock)")
+        }
         // Offline / token rejected returns JSON or HTML, not m3u8
         if (!text.contains("#EXTM3U")) {
-            Log.w(TAG, "master not m3u8: ${text.take(800)}")
-            throw RuntimeException("Channel offline or token rejected: ${text.take(300)}")
+            val masked = text.replace(Regex("token=[^&\\s]+"), "token=***")
+            Log.w(TAG, "master not m3u8: ${masked.take(800)}")
+            throw RuntimeException("Channel offline or token rejected: ${masked.take(300)}")
         }
         parseMasterPlaylist(text, masterUrl)
     }
@@ -236,9 +274,11 @@ object TwitchService {
             conn.requestMethod = "GET"
             conn.connectTimeout = timeoutMs
             conn.readTimeout = timeoutMs
+            conn.instanceFollowRedirects = true
             conn.setRequestProperty("Accept", "application/vnd.apple.mpegurl,*/*")
             conn.setRequestProperty("Origin", "https://www.twitch.tv")
             conn.setRequestProperty("Referer", "https://www.twitch.tv/")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0")
             val code = conn.responseCode
             if (code !in 200..299) throw RuntimeException("HTTP $code fetching $urlStr")
             return BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).readText()

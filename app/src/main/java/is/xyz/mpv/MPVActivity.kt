@@ -198,6 +198,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var twitchVariants: List<TwitchService.Variant> = emptyList()
     private var twitchCurrentVariantUrl: String? = null
     private var twitchAdMonitor: `is`.xyz.mpv.twitch.TwitchAdMonitor? = null
+    private var twitchPrevHeaders: String? = null
+    private var twitchPrevUa: String? = null
     /* * */
 
     @SuppressLint("ClickableViewAccessibility")
@@ -343,13 +345,15 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         player.addObserver(this)
         player.initialize(filesDir.path, cacheDir.path)
-        // Twitch: set browser-like headers for usher/video-weaver (prevents 403)
+        // Twitch: set browser-like headers for usher/video-weaver (prevents 403) - save prev to restore (M5)
         if (twitchChannel != null) {
             try {
+                twitchPrevHeaders = MPVLib.getPropertyString("http-header-fields")
+                twitchPrevUa = MPVLib.getPropertyString("user-agent")
                 MPVLib.setOptionString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
                 MPVLib.setOptionString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                // enable verbose mpv logs for Twitch debugging (visible via adb logcat mpv:V)
-                MPVLib.setOptionString("msg-level", "all=v")
+                // only verbose in debug, not release (battery/log spam)
+                if (BuildConfig.DEBUG) MPVLib.setOptionString("msg-level", "all=v")
                 Log.v(TAG, "Twitch headers set for $twitchChannel master=$twitchMasterUrl")
             } catch (_: Exception) {}
         }
@@ -382,11 +386,13 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             try {
                 val prefs = getDefaultSharedPreferences(this)
                 val prefQuality = prefs.getString("twitch_last_quality_$ch", "chunked") ?: "chunked"
-                // Pre-warm noAd master (picture-by-picture) lazily
+                // Pre-warm noAd master (picture-by-picture) lazily - use applicationContext to avoid leak (C4)
                 lifecycleScope.launch {
+                    if (isFinishing || isDestroyed) return@launch
                     var noAdMaster: String? = null
-                    try { noAdMaster = TwitchService.getHlsMasterUrl(this@MPVActivity, ch, withoutAds = true) } catch (_: Exception) {}
-                    twitchAdMonitor = TwitchAdMonitor(this@MPVActivity, ch, prefQuality, { newUrl, reason, isAudio ->
+                    try { noAdMaster = TwitchService.getHlsMasterUrl(applicationContext, ch, withoutAds = true) } catch (_: Exception) {}
+                    if (isFinishing || isDestroyed) return@launch
+                    twitchAdMonitor = TwitchAdMonitor(applicationContext, ch, prefQuality, { newUrl, reason, isAudio ->
                         Log.i(TAG, "AdMonitor switch $reason -> $newUrl")
                         runOnUiThread {
                             try {
@@ -459,6 +465,14 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // Stop Twitch ad monitor (dual-list parity)
         twitchAdMonitor?.stop()
         twitchAdMonitor = null
+
+        // Restore mpv headers (M5) to avoid privacy leak for next non-Twitch file
+        try {
+            if (twitchPrevHeaders != null) MPVLib.setOptionString("http-header-fields", twitchPrevHeaders!!) else MPVLib.setOptionString("http-header-fields", "")
+            if (twitchPrevUa != null) MPVLib.setOptionString("user-agent", twitchPrevUa!!)
+        } catch (_: Exception) {}
+        twitchPrevHeaders = null
+        twitchPrevUa = null
 
         // take the background service with us
         stopServiceRunnable.run()

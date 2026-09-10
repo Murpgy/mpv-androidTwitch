@@ -88,8 +88,10 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun refreshList() {
-        val fav = TwitchService.getFavorites(requireContext())
-        val recent = TwitchService.getRecent(requireContext())
+        if (!isAdded || !::binding.isInitialized || !::adapter.isInitialized) return
+        val ctx = context ?: return
+        val fav = TwitchService.getFavorites(ctx)
+        val recent = TwitchService.getRecent(ctx)
         // merge: fav first, then recent not in fav
         val combined = (fav + recent.filterNot { fav.contains(it) }).distinct()
         adapter.submit(combined)
@@ -98,6 +100,13 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
         // subtitle
         binding.subtitle.text = if (fav.isEmpty()) "Add streamers to start \u00b7 tap + below"
         else "${fav.size} favorite${if(fav.size!=1) "s" else ""} \u00b7 ${recent.size} recent"
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        // avoid view leak (N4) - binding holds view after destroy, but fragment is retained
+        // no explicit null needed for lateinit, but clear adapter reference
+        if (::adapter.isInitialized) adapter.submit(emptyList())
     }
 
     private fun showAddDialog() {
@@ -110,12 +119,12 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             .setTitle("Add streamer")
             .setView(input)
             .setPositiveButton("Add") { _, _ ->
-                val name = input.text.toString().trim().lowercase().replace(Regex("[^a-z0-9_]+"), "")
-                if (name.isEmpty() || name.length < 2) {
-                    Toast.makeText(requireContext(), "Invalid name", Toast.LENGTH_SHORT).show()
+                val raw = input.text.toString().trim().lowercase().replace(Regex("[^a-z0-9_]+"), "")
+                if (!Regex("^[a-z0-9_]{4,25}$").matches(raw)) {
+                    Toast.makeText(requireContext(), "Invalid name (4-25 chars a-z0-9_)", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
-                TwitchService.addFavorite(requireContext(), name)
+                TwitchService.addFavorite(requireContext(), raw)
                 refreshList()
             }
             .setNegativeButton("Cancel", null)
@@ -146,13 +155,15 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     }
 
     private fun playChannel(channel: String, forceAudioOnly: Boolean? = null) {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        if (!isAdded) return
+        val appCtx = requireContext().applicationContext
+        val prefs = PreferenceManager.getDefaultSharedPreferences(appCtx)
         val audioOnly = forceAudioOnly ?: prefs.getBoolean("twitch_audio_only", false)
 
         // remember recent
-        TwitchService.pushRecent(requireContext(), channel)
+        TwitchService.pushRecent(appCtx, channel)
 
-        // show loading
+        // show loading - use viewLifecycleOwner to avoid leak
         val dlg = AlertDialog.Builder(requireContext())
             .setTitle("Connecting to $channel…")
             .setMessage("Fetching stream (${if(audioOnly) "audio-only" else "auto quality"})…")
@@ -160,11 +171,13 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             .create()
         dlg.show()
 
-        lifecycleScope.launch {
+        // Use viewLifecycleOwner.lifecycleScope + isAdded guards (C3)
+        viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val master = TwitchService.getHlsMasterUrl(requireContext(), channel, withoutAds = false)
+                val master = TwitchService.getHlsMasterUrl(appCtx, channel, withoutAds = false)
+                if (!isAdded) return@launch
                 if (master.isEmpty()) throw RuntimeException("empty master URL - offline?")
-                dlg.dismiss()
+                if (dlg.isShowing) dlg.dismiss()
 
                 // If audioOnly requested, try to fetch variants and pick audio_only
                 if (audioOnly) {
@@ -181,13 +194,16 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                     launchPlayer(channel, master, master, isAudioOnly = false)
                 }
             } catch (e: Exception) {
-                dlg.dismiss()
+                if (!isAdded) return@launch
+                if (dlg.isShowing) dlg.dismiss()
                 Log.w("TwitchMain", "play failed", e)
                 val msg = when {
                     e.message?.contains("ACCESS_DENIED") == true -> "Twitch blocked (integrity). Try again or update Client-ID."
                     e.message?.contains("404") == true || e.message?.contains("offline") == true -> "$channel is offline or does not exist"
+                    e.message?.contains("^[a-z0-9_]{4,25}$".toRegex().toString()) == true -> "Invalid channel name"
                     else -> "Failed: ${e.message}"
                 }
+                if (!isAdded) return@launch
                 AlertDialog.Builder(requireContext())
                     .setTitle("Cannot play $channel")
                     .setMessage(msg + "\n\nTip: you can still open in browser or try audio-only.")

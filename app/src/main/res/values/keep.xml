@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@layout/fragment_twitch_main,@layout/item_twitch_channel,@layout/dialog_top_menu,@drawable/ic_filter_alt_24dp,@drawable/ic_play_arrow_black_24dp" />
