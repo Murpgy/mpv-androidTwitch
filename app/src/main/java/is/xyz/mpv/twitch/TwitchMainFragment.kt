@@ -61,11 +61,15 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                     builder.setNegativeButton(R.string.dialog_cancel) { d,_ -> d.cancel() }; create().show() }
             }
 
-            // audio-only switch reflects mpv background + power saver
+            // audio-only switch reflects mpv background + power saver (synced with quality)
             val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
             binding.audioOnlySwitch.isChecked = prefs.getBoolean("twitch_audio_only", false)
             binding.audioOnlySwitch.setOnCheckedChangeListener { _, checked ->
                 prefs.edit().putBoolean("twitch_audio_only", checked).apply()
+                // keep global quality in sync
+                if (checked) prefs.edit().putString("twitch_default_quality", "audio_only").apply()
+                else if (prefs.getString("twitch_default_quality", "chunked") == "audio_only") prefs.edit().putString("twitch_default_quality", "chunked").apply()
+                updateQualityBtn()
                 Toast.makeText(requireContext(), if(checked) "Audio-only: max battery" else "Video enabled", Toast.LENGTH_SHORT).show()
             }
 
@@ -74,11 +78,104 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
             binding.openTwitchBtn.setOnClickListener {
                 try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/directory"))) } catch (_: Exception) {}
             }
+            binding.qualityBtn.setOnClickListener { showGlobalQualityPicker() }
+            binding.qualityInfoBtn.setOnClickListener {
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Quality & Cache")
+                    .setMessage("Source = best available (auto). Audio only = ~160kbps, battery saver (~10x less bandwidth). Respects per-channel choice if set, otherwise global.\n\nCache: mpv keeps ~64MB (~30-60s at 1080p, 20min at audio-only) for rewinding within window. Beyond that re-fetches. On spotty mobile, mpv auto-pauses (cache) and resumes; original extension retries 1-2 parallel downloads with 6s timeout.")
+                    .setPositiveButton("OK", null).show()
+            }
+            updateQualityBtn()
 
             refreshList()
         } catch (e: Exception) {
             Log.e("TwitchMain", "onViewCreated failed", e)
             Toast.makeText(requireContext(), "Twitch UI init failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun updateQualityBtn() {
+        if (!::binding.isInitialized) return
+        val ctx = context ?: return
+        val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+        val global = prefs.getString("twitch_default_quality", "chunked") ?: "chunked"
+        val label = when (global) {
+            "chunked" -> "Source (Auto)"
+            "audio_only" -> "Audio only ♪"
+            else -> global
+        }
+        binding.qualityBtn.text = label
+    }
+
+    private fun showGlobalQualityPicker() {
+        if (!isAdded) return
+        // Static list same as extension (chunked first, audio last) - actual available filtered at play time
+        val options = arrayOf("Source (Auto) - chunked", "1080p60", "1080p", "720p60", "720p", "480p", "360p", "160p", "Audio only ♪ battery")
+        val ids = arrayOf("chunked", "1080p60", "1080p", "720p60", "720p", "480p", "360p", "160p", "audio_only")
+        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        val current = prefs.getString("twitch_default_quality", "chunked")
+        val idx = ids.indexOf(current).coerceAtLeast(0)
+        AlertDialog.Builder(requireContext())
+            .setTitle("Default quality (main menu)")
+            .setSingleChoiceItems(options, idx) { dlg, which ->
+                dlg.dismiss()
+                val chosen = ids[which]
+                prefs.edit().putString("twitch_default_quality", chosen).apply()
+                // sync audio-only switch for visibility (global quality audio_only == switch on)
+                prefs.edit().putBoolean("twitch_audio_only", chosen == "audio_only").apply()
+                binding.audioOnlySwitch.isChecked = chosen == "audio_only"
+                updateQualityBtn()
+                Toast.makeText(requireContext(), "Default: ${options[which]}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showChannelQualityPicker(channel: String) {
+        if (!isAdded) return
+        val ctx = requireContext().applicationContext
+        val loading = AlertDialog.Builder(requireContext()).setTitle("Fetching qualities for $channel…").setMessage("Contacting Twitch…").setCancelable(false).create()
+        loading.show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val master = TwitchService.getHlsMasterUrl(ctx, channel, withoutAds = false)
+                val variants = TwitchService.fetchVariants(master)
+                if (!isAdded) return@launch
+                loading.dismiss()
+                // variants sorted: chunked first, audio last, rest by bitrate
+                val labels = variants.map { v ->
+                    when {
+                        v.isAudioOnly -> "Audio only ♪ battery - ${v.displayLabel()}"
+                        v.isSource -> "Source (Auto) - ${v.width}x${v.height}"
+                        else -> "${v.name} - ${v.width}x${v.height} ${if (v.bandwidth>0) "(${v.bandwidth/1000}k)" else ""}"
+                    }
+                }.toTypedArray()
+                val ids = variants.map { it.id }.toTypedArray()
+                val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+                val current = prefs.getString("twitch_quality_$channel", prefs.getString("twitch_default_quality", "chunked"))
+                val curIdx = ids.indexOf(current).coerceAtLeast(0)
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Quality for $channel")
+                    .setSingleChoiceItems(labels, curIdx) { dlg, which ->
+                        dlg.dismiss()
+                        val chosen = ids[which]
+                        prefs.edit().putString("twitch_quality_$channel", chosen).apply()
+                        // also save bitrate like original (optional)
+                        Toast.makeText(ctx, "$channel: ${labels[which]}", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("Clear (use global)") { _, _ ->
+                        prefs.edit().remove("twitch_quality_$channel").apply()
+                        Toast.makeText(ctx, "Cleared per-channel, using global", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            } catch (e: Exception) {
+                if (!isAdded) return@launch
+                loading.dismiss()
+                // fallback to global picker
+                Toast.makeText(ctx, "Fetch failed: ${e.message}, showing global list", Toast.LENGTH_SHORT).show()
+                showGlobalQualityPicker()
+            }
         }
     }
 
@@ -144,12 +241,13 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
     private fun showChannelOptions(channel: String) {
         AlertDialog.Builder(requireContext())
             .setTitle(channel)
-            .setItems(arrayOf("Play", "Play audio-only", "Remove favorite", "Open in browser")) { _, which ->
+            .setItems(arrayOf("Play", "Play audio-only", "Set quality for this channel…", "Remove favorite", "Open in browser")) { _, which ->
                 when(which) {
                     0 -> playChannel(channel, forceAudioOnly = false)
                     1 -> playChannel(channel, forceAudioOnly = true)
-                    2 -> { TwitchService.removeFavorite(requireContext(), channel); refreshList() }
-                    3 -> try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/$channel"))) } catch (_: Exception) {}
+                    2 -> showChannelQualityPicker(channel)
+                    3 -> { TwitchService.removeFavorite(requireContext(), channel); refreshList() }
+                    4 -> try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/$channel"))) } catch (_: Exception) {}
                 }
             }.show()
     }
@@ -177,20 +275,32 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                 val master = TwitchService.getHlsMasterUrl(appCtx, channel, withoutAds = false)
                 if (!isAdded) return@launch
                 if (master.isEmpty()) throw RuntimeException("empty master URL - offline?")
-                if (dlg.isShowing) dlg.dismiss()
-
-                // If audioOnly requested, try to fetch variants and pick audio_only
-                if (audioOnly) {
+                // Determine effective quality (extension parity: per-channel > global > audio switch)
+                val globalQuality = prefs.getString("twitch_default_quality", "chunked") ?: "chunked"
+                val perChannel = prefs.getString("twitch_quality_$channel", globalQuality) ?: globalQuality
+                val effectiveQuality = when {
+                    forceAudioOnly == true -> "audio_only"
+                    forceAudioOnly == false -> perChannel // respect per-channel even if audio_only
+                    audioOnly -> "audio_only"
+                    else -> perChannel
+                }
+                val isAudioEff = effectiveQuality == "audio_only"
+                // Update dialog message with quality
+                if (dlg.isShowing) dlg.setMessage("Fetching ${if (isAudioEff) "audio-only" else effectiveQuality}…")
+                if (isAudioEff || effectiveQuality != "chunked") {
                     try {
                         val variants = TwitchService.fetchVariants(master)
-                        val audio = variants.firstOrNull { it.isAudioOnly }
-                        val targetUrl = audio?.url ?: master
-                        launchPlayer(channel, targetUrl, master, isAudioOnly = true)
+                        val chosen = variants.find { it.id == effectiveQuality } ?: variants.find { it.isAudioOnly } ?: variants.firstOrNull()
+                        val targetUrl = chosen?.url ?: master
+                        if (dlg.isShowing) dlg.dismiss()
+                        launchPlayer(channel, targetUrl, master, isAudioOnly = isAudioEff)
                     } catch (e: Exception) {
                         Log.w("TwitchMain", "variant fetch failed, falling back to master", e)
-                        launchPlayer(channel, master, master, isAudioOnly = true)
+                        if (dlg.isShowing) dlg.dismiss()
+                        launchPlayer(channel, master, master, isAudioOnly = isAudioEff)
                     }
                 } else {
+                    if (dlg.isShowing) dlg.dismiss()
                     launchPlayer(channel, master, master, isAudioOnly = false)
                 }
             } catch (e: Exception) {

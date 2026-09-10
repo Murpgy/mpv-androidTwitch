@@ -50,6 +50,38 @@
             android:text="Browse" />
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="8dp"
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Quality:"
+            android:textSize="14sp"
+            android:alpha="0.8"
+            android:paddingEnd="8dp"/>
+
+        <Button
+            android:id="@+id/qualityBtn"
+            style="@style/Widget.AppCompat.Button.Colored"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Source (Auto)" />
+
+        <Button
+            android:id="@+id/qualityInfoBtn"
+            style="@style/Widget.AppCompat.Button.Colored"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="?" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/emptyHint"
         android:layout_width="match_parent"
