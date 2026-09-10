@@ -140,7 +140,7 @@ class TwitchAdMonitor(
                     val isPowerSave = pm?.isPowerSaveMode == true
                     val baseInterval = if (isInAdMode) 2000L else (extractTargetDuration(siteMediaText) * 1000L * 3 / 4)
                     var interval = baseInterval.coerceIn(3000, 8000)
-                    if (isPowerSave) interval = (interval * 1.5).toLong().coerceAtMost(12000)
+                    if (isPowerSave) interval = (interval * 1.2).toLong().coerceAtMost(8000)
                     interval += Random.nextLong(400) // jitter
                     delay(interval)
 
@@ -181,7 +181,6 @@ class TwitchAdMonitor(
             conn.connectTimeout = 5000
             conn.readTimeout = 5000
             conn.setRequestProperty("Accept", "application/vnd.apple.mpegurl,*/*")
-            conn.setRequestProperty("Connection", "keep-alive")
             conn.setRequestProperty("Referer", "https://www.twitch.tv/")
             conn.setRequestProperty("Origin", "https://www.twitch.tv")
             conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36")

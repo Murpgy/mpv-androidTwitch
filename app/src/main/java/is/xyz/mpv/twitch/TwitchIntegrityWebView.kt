@@ -112,7 +112,8 @@ object TwitchIntegrityWebView {
                 cont.invokeOnCancellation {
                     handler.removeCallbacks(timeoutRunnable)
                     handler.removeCallbacksAndMessages(null)
-                    safeDestroy()
+                    // destroy must run on Main thread
+                    handler.post { safeDestroy() }
                 }
             }
         } catch (e: Exception) {

@@ -352,8 +352,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 twitchPrevHeaders = MPVLib.getPropertyString("http-header-fields")
                 twitchPrevUa = MPVLib.getPropertyString("user-agent")
                 MPVLib.setPropertyString("http-header-fields", "Referer: https://www.twitch.tv/\nOrigin: https://www.twitch.tv")
-                MPVLib.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-                if (BuildConfig.DEBUG) MPVLib.setPropertyString("msg-level", "all=v")
+                // user-agent is option-only on some libmpv; try property then fallback to file-local-options via command
+                try { MPVLib.setPropertyString("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36") } catch (_: Exception) {}
+                try { MPVLib.command(arrayOf("set", "file-local-options/user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")) } catch (_: Exception) {}
+                if (BuildConfig.DEBUG) try { MPVLib.setPropertyString("msg-level", "all=v") } catch (_: Exception) {}
                 Log.v(TAG, "Twitch headers set for $twitchChannel master=$twitchMasterUrl")
             } catch (_: Exception) {}
         }

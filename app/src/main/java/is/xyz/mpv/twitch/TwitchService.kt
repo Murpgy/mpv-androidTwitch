@@ -58,7 +58,7 @@ object TwitchService {
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         // fast path without lock
         prefs.getString("twitch_device_id", null)?.takeIf { it.isNotEmpty() }?.let { return it }
-        synchronized(cacheLock) {
+        synchronized(deviceIdLock) {
             prefs.getString("twitch_device_id", null)?.takeIf { it.isNotEmpty() }?.let { return it }
             val hex = UUID.randomUUID().toString().replace("-", "").take(16)
             val id = "0000000000000000$hex".take(32)
@@ -77,6 +77,7 @@ object TwitchService {
     // In-memory cache for PlaybackAccessToken URL like player.js:5682 - channel-keyed (C1 fix)
     private data class CachedUrl(val url: String, val expiry: Long)
     private val cacheLock = Any()
+    private val deviceIdLock = Any()
     private val cachedM3u8 = mutableMapOf<String, CachedUrl>() // key = channel
     private const val TOKEN_TTL_MS = 15 * 60 * 1000L
 
@@ -84,8 +85,8 @@ object TwitchService {
     private val RES_REGEX = Regex("(\\d+)x(\\d+)")
     private val ATTR_REGEX = Regex("""([A-Z0-9\-]+)=(?:"([^"]*)"|([^,]*))""")
     private val TARGET_DURATION_REGEX = Regex("#EXT-X-TARGETDURATION:(\\d+)")
-    private val TOKEN_MASK_REGEX = Regex("token=[^&]+")
-    private val SIG_MASK_REGEX = Regex("sig=[^&]+")
+    private val TOKEN_MASK_REGEX = Regex("token=[^&\\s]+")
+    private val SIG_MASK_REGEX = Regex("sig=[^&\\s]+")
 
     /**
      * Get HLS master m3u8 URL for channel. Equivalent to ПолучитьАбсолютныйАдресСпискаВариантов.
@@ -95,10 +96,11 @@ object TwitchService {
     suspend fun getHlsMasterUrl(context: Context, channel: String, withoutAds: Boolean = false): String = withContext(Dispatchers.IO) {
         val clean = channel.trim().lowercase()
         require(clean.isNotEmpty()) { "empty channel" }
-        // Evict expired entries to bound memory
+        // Evict expired entries to bound memory - iterator not removeIf (API24) for minSdk 23
         synchronized(cacheLock) {
             val now = System.currentTimeMillis()
-            cachedM3u8.entries.removeIf { now >= it.value.expiry }
+            val it = cachedM3u8.entries.iterator()
+            while (it.hasNext()) if (now >= it.next().value.expiry) it.remove()
         }
         // Return cached if valid and not ad-free request (ad path uses different token)
         if (!withoutAds) {
@@ -250,7 +252,6 @@ object TwitchService {
             conn.doOutput = true
             conn.doInput = true
             for ((k,v) in headers) conn.setRequestProperty(k, v)
-            conn.setRequestProperty("Connection", "keep-alive")
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -548,7 +549,6 @@ object TwitchService {
             conn.doOutput = true
             conn.doInput = true
             for ((k,v) in headers) conn.setRequestProperty(k, v)
-            conn.setRequestProperty("Connection", "keep-alive")
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -558,4 +558,5 @@ object TwitchService {
             return resp
         } finally { conn.disconnect() }
     }
+}
 }

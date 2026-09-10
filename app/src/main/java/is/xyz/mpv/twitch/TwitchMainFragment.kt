@@ -267,7 +267,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                     return@setPositiveButton
                 }
                 TwitchService.addFavorite(requireContext(), raw)
-                refreshList()
+                refreshList(force = true)
             }
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Paste URL") { _, _ ->
@@ -277,7 +277,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                 val m = Regex("twitch\\.tv/([a-zA-Z0-9_]+)").find(text)
                 if (m != null) {
                     TwitchService.addFavorite(requireContext(), m.groupValues[1].lowercase())
-                    refreshList()
+                    refreshList(force = true)
                 } else Toast.makeText(requireContext(), "No twitch URL in clipboard", Toast.LENGTH_SHORT).show()
             }
             .show()
@@ -291,7 +291,7 @@ class TwitchMainFragment : Fragment(R.layout.fragment_twitch_main) {
                     0 -> playChannel(channel, forceAudioOnly = false)
                     1 -> playChannel(channel, forceAudioOnly = true)
                     2 -> showChannelQualityPicker(channel)
-                    3 -> { TwitchService.removeFavorite(requireContext(), channel); refreshList() }
+                    3 -> { TwitchService.removeFavorite(requireContext(), channel); refreshList(force = true) }
                     4 -> try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://twitch.tv/$channel"))) } catch (_: Exception) {}
                 }
             }.show()

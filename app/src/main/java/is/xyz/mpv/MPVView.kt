@@ -97,8 +97,9 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
         MPVLib.setOptionString("gpu-context", "android")
         MPVLib.setOptionString("opengl-es", "yes")
         MPVLib.setOptionString("hwdec", hwdec)
-        // Twitch is h264 only - limit codecs to avoid wasted probe and SW fallback
-        MPVLib.setOptionString("hwdec-codecs", "h264,hevc")
+        // Twitch is h264 only - keep generic files working via fallback
+        val isTwitchLike = try { PreferenceManager.getDefaultSharedPreferences(context).getString("twitch_device_id", null) != null } catch (_: Exception) { false }
+        MPVLib.setOptionString("hwdec-codecs", if (isTwitchLike) "h264,hevc" else "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         MPVLib.setOptionString("ao", "audiotrack,opensles")
         MPVLib.setOptionString("audio-set-media-role", "yes")
         MPVLib.setOptionString("tls-verify", "yes")
